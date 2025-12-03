@@ -404,6 +404,98 @@ def admin_clear():
     MODEL_CACHE.clear()
     return {"cleared": True}
 
+@app.post("/fusion/tts_video")
+async def tts_to_video(req: TTSRequest, image: UploadFile = File(...), user_id: str = Form("guest")):
+    ok, reason = moderate_text_basic(req.text)
+    if not ok:
+        raise HTTPException(400, detail=reason or "Blocked")
+    if not consume_token(user_id, cost=3):
+        raise HTTPException(429, detail="Rate limit exceeded")
+
+    audio_path = None
+    if ELEVEN_API_KEY and httpx:
+        try:
+            voice = req.voice or "alloy"
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
+            headers = {"xi-api-key": ELEVEN_API_KEY, "Accept": "audio/mpeg", "Content-Type": "application/json"}
+            payload = {"text": req.text}
+            r = httpx.post(url, headers=headers, json=payload, timeout=30.0)
+            audio_path = write_temp_file(r.content, ".mp3")
+        except Exception:
+            logger.exception("ElevenLabs TTS failed")
+
+    img_bytes = await image.read()
+    img_path = write_temp_file(img_bytes, ".png")
+    video_path = os.path.join(MEDIA_DIR, f"video_{uuid.uuid4().hex}.mp4")
+
+    try:
+        import moviepy.editor as mpy
+        clip = mpy.ImageClip(img_path).set_duration(5)
+        if audio_path:
+            clip = clip.set_audio(mpy.AudioFileClip(audio_path))
+        clip.write_videofile(video_path, fps=24, verbose=False, logger=None)
+        return FileResponse(video_path, media_type="video/mp4", filename=os.path.basename(video_path))
+    except Exception:
+        logger.exception("Video creation failed")
+        raise HTTPException(500, detail="Video creation failed")
+
+@app.post("/vision/video_pose")
+async def video_pose(file: UploadFile = File(...), user_id: str = Form("guest")):
+    ok, reason = moderate_text_basic(file.filename or "")
+    if not ok:
+        raise HTTPException(400, detail=reason)
+    if not consume_token(user_id, cost=3):
+        raise HTTPException(429, detail="Rate limit exceeded")
+
+    tmp_video = write_temp_file(await file.read(), ".mp4")
+    model_id = get_best_model_id("vision:pose2d")
+    
+    if HF_TOKEN and model_id:
+        try:
+            resp = await hf_inference_async(model_id, open(tmp_video,"rb").read())
+            return {"source":"hf","pose_data":resp}
+        except Exception:
+            logger.exception("HF video pose detection failed")
+    
+    return JSONResponse({"error":"Video pose detection requires HF model or local pipeline."}, status_code=503)
+
+@app.post("/document/qa")
+async def document_qa(file: UploadFile = File(...), question: str = Form(...), user_id: str = Form("guest")):
+    ok, reason = moderate_text_basic(question)
+    if not ok:
+        raise HTTPException(400, detail=reason)
+    if not consume_token(user_id, cost=3):
+        raise HTTPException(429, detail="Rate limit exceeded")
+
+    tmp_file = write_temp_file(await file.read(), os.path.splitext(file.filename)[1] if file.filename else ".pdf")
+    # Step 1: extract text (placeholder)
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(tmp_file)
+        doc_text = " ".join([p.extract_text() or "" for p in reader.pages])
+    except Exception:
+        doc_text = "(text extraction failed)"
+
+    # Step 2: run HF LLM to answer
+    model_id = get_best_model_id("text:chat")
+    if HF_TOKEN and model_id:
+        try:
+            prompt = f"Answer this question based on the document: {question}\nDocument: {doc_text[:5000]}"
+            resp = hf_inference_request(model_id, prompt, params={"max_new_tokens":512})
+            if isinstance(resp, dict) and "generated_text" in resp:
+                answer = resp["generated_text"]
+            elif isinstance(resp, list) and resp and isinstance(resp[0], dict) and "generated_text" in resp[0]:
+                answer = resp[0]["generated_text"]
+            else:
+                answer = str(resp)[:2000]
+            return {"source":"hf","answer":answer}
+        except Exception:
+            logger.exception("HF document QA failed")
+
+    return JSONResponse({"error":"Document QA requires HF LLM."}, status_code=503)
+
+
+
 @app.get("/admin/models")
 def admin_models():
     return {"registry": MODEL_REGISTRY, "loaded": list(MODEL_CACHE.keys())}
