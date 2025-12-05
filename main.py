@@ -1,26 +1,28 @@
-# main.py — Zynara Super-Ultimate: full multimodal backend
-# WARNING: This is a large, feature-rich demo. Configure tokens, GPU, and infra before running.
+# ============================
+# main.py — Zynara Ultra v5 (PART 1/3)
+# Hybrid architecture (local GPUs + cloud fallback)
+# Core imports, config, utilities, moderation, model routing, RAG helpers, streaming
+# ============================
 
 import os
 import io
 import sys
-import time
 import json
+import time
 import uuid
-import math
-import shutil
+import base64
+import hashlib
 import logging
 import asyncio
 import traceback
 from typing import Optional, List, Dict, Any, Tuple
-from functools import lru_cache
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, BackgroundTasks, WebSocket, WebSocketDisconnect, Depends
-from fastapi.responses import JSONResponse, FileResponse, StreamingResponse, PlainTextResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Optional libs imported lazily
+# Optional heavy libs — import safely and fallback
 try:
     import torch
 except Exception:
@@ -31,11 +33,17 @@ try:
 except Exception:
     httpx = None
 
-# transformers / diffusers / whisper / PIL - used if available locally
 try:
-    from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline, AutoModelForSeq2SeqLM, AutoModel
+    from transformers import AutoTokenizer, AutoModelForCausalLM
 except Exception:
-    AutoTokenizer = AutoModelForCausalLM = pipeline = AutoModelForSeq2SeqLM = AutoModel = None
+    AutoTokenizer = None
+    AutoModelForCausalLM = None
+
+try:
+    from diffusers import StableDiffusionPipeline, StableDiffusionInpaintPipeline
+except Exception:
+    StableDiffusionPipeline = None
+    StableDiffusionInpaintPipeline = None
 
 try:
     from PIL import Image
@@ -43,60 +51,74 @@ except Exception:
     Image = None
 
 try:
-    from diffusers import StableDiffusionPipeline
-except Exception:
-    StableDiffusionPipeline = None
-
-try:
     from faster_whisper import WhisperModel
 except Exception:
     WhisperModel = None
 
-# Supabase and Redis clients (optional)
 try:
-    from supabase import create_client as create_supabase_client
+    from sentence_transformers import SentenceTransformer
 except Exception:
-    create_supabase_client = None
+    SentenceTransformer = None
+
+try:
+    from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType
+except Exception:
+    connections = Collection = FieldSchema = CollectionSchema = DataType = None
+
+try:
+    import ffmpeg
+except Exception:
+    ffmpeg = None
 
 try:
     import redis as redis_lib
 except Exception:
     redis_lib = None
 
-# Optional: vLLM/text-generation-inference integration would go here for best performance.
+try:
+    from supabase import create_client as create_supabase_client
+except Exception:
+    create_supabase_client = None
 
-# --------------------------- Logging ---------------------------
+# ---------------- logging ----------------
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("zynara")
 
-# --------------------------- Config ---------------------------
-APP_NAME = os.getenv("APP_NAME", "Zynara Super-Ultimate")
-CREATOR = os.getenv("APP_AUTHOR", "GoldBoy")
+# ---------------- config ----------------
+APP_NAME = os.getenv("APP_NAME", "Zynara Ultra v5")
 PORT = int(os.getenv("PORT", "7860"))
-HF_TOKEN = os.getenv("HF_TOKEN")  # Hugging Face Inference token
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional moderation / fallback
-ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY")  # ElevenLabs TTS
+HF_TOKEN = os.getenv("HF_TOKEN")                 # Hugging Face Inference or model hosting token
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")     # optional (moderation / OpenAI endpoints)
+ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY")     # ElevenLabs TTS
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 USE_HF_INFERENCE = os.getenv("USE_HF_INFERENCE", "1") == "1"
+VLLM_URL = os.getenv("VLLM_URL")                 # e.g. http://vllm:8000 or TGI endpoint for streaming
+MILVUS_HOST = os.getenv("MILVUS_HOST", "milvus")
+MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL", "all-mpnet-base-v2")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
-
 TMP_DIR = os.getenv("TMP_DIR", "/tmp/zynara")
 os.makedirs(TMP_DIR, exist_ok=True)
 MEDIA_DIR = os.path.join(TMP_DIR, "media")
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
-# --------------------------- App ---------------------------
-app = FastAPI(title=APP_NAME, description=f"{APP_NAME} by {CREATOR}")
+# Hybrid toggles
+USE_LOCAL_SDXL = os.getenv("USE_LOCAL_SDXL", "1") == "1"
+USE_LOCAL_WHISPER = os.getenv("USE_LOCAL_WHISPER", "1") == "1"
+USE_LLAMA_405B = os.getenv("USE_LLAMA_405B", "0") == "1"
+
+# ---------------- app ----------------
+app = FastAPI(title=APP_NAME)
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS or ["*"], allow_methods=["*"], allow_headers=["*"])
 
-# --------------------------- Optional Clients ---------------------------
+# ---------------- optional clients ----------------
 supabase = None
 if create_supabase_client and SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_supabase_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.info("Supabase initialized")
+        logger.info("Supabase client initialized")
     except Exception as e:
         logger.warning("Supabase init failed: %s", e)
 
@@ -108,7 +130,7 @@ if redis_lib and REDIS_URL:
     except Exception as e:
         logger.warning("Redis init failed: %s", e)
 
-# --------------------------- Utilities ---------------------------
+# ---------------- utilities ----------------
 def now_ts() -> int:
     return int(time.time())
 
@@ -119,20 +141,9 @@ def write_temp_file(data: bytes, suffix: str = "") -> str:
     return path
 
 def stable_id(s: str) -> str:
-    import hashlib
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
-def cleanup_temp_files(older_than_seconds: int = 3600):
-    now = time.time()
-    for fn in os.listdir(MEDIA_DIR):
-        path = os.path.join(MEDIA_DIR, fn)
-        try:
-            if os.path.isfile(path) and (now - os.path.getmtime(path)) > older_than_seconds:
-                os.remove(path)
-        except Exception:
-            pass
-
-# --------------------------- Moderation ---------------------------
+# ---------------- moderation ----------------
 def moderate_text_basic(text: str) -> Tuple[bool, Optional[str]]:
     if not text:
         return True, None
@@ -140,71 +151,56 @@ def moderate_text_basic(text: str) -> Tuple[bool, Optional[str]]:
     for b in banned:
         if b in text.lower():
             return False, f"Blocked word: {b}"
-    # Optionally call OpenAI moderation if key present
+    # OpenAI moderation if available
     if OPENAI_API_KEY and httpx:
         try:
-            r = httpx.post("https://api.openai.com/v1/moderations", headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}, json={"input": text}, timeout=10.0)
-            if r.status_code == 200:
-                jr = r.json()
+            resp = httpx.post("https://api.openai.com/v1/moderations", headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}, json={"input": text}, timeout=10.0)
+            if resp.status_code == 200:
+                jr = resp.json()
                 if jr.get("results") and jr["results"][0].get("flagged"):
                     return False, "OpenAI moderation flagged content"
         except Exception:
-            logger.debug("OpenAI moderation failed", exc_info=True)
+            logger.debug("OpenAI moderation API call failed", exc_info=True)
     return True, None
 
-# --------------------------- MODEL REGISTRY ---------------------------
+# ---------------- model registry & cache ----------------
 MODEL_REGISTRY: Dict[str, List[str]] = {
-    "text:chat":["meta-llama/Llama-3-70B","tiiuae/falcon-180b"],
-    "code:gen":["bigcode/starcoder","Salesforce/codegen-6B-multi"],
-    "image:sdxl":["stabilityai/stable-diffusion-xl-base-1.0"],
-    "vision:caption":["Salesforce/blip2-flan-t5-xl"],
-    "vision:vqa":["Salesforce/blip-vqa-large"],
-    "speech:stt":["openai/whisper-large-v2"],
-    "audio:music":["facebook/musicgen-large"],
-    "vision:detector":["ultralytics/yolov8x"],
-    "vision:ocr":["microsoft/trocr-large-handwritten"],
-    "image:inpaint":["stabilityai/stable-diffusion-x4-inpainting"],
-    "image:upscale":["nateraw/real-esrgan"],
-    "text:embed":["sentence-transformers/all-mpnet-base-v2"],
-    "text:summarization":["facebook/bart-large-cnn"],
-    "text:translation":["Helsinki-NLP/opus-mt-en-ROMANCE"],
-    "text:sentiment":["distilbert-base-uncased-finetuned-sst-2-english"],
-    "document:layoutlm":["layoutlmv3-base"],
-    "3d:pointcloud":["openai/point-e"],
-    "ml:anomaly":["anomaly-detection-model"],
-    "ml:game_ai":["game-behavior-model"],
-    "image:style_transfer":["style-transfer-model"],
-    "vision:pose2anim":["pose-to-character-model"]
+    "text:chat": ["meta-llama/Llama-3-70B", "tiiuae/falcon-180b"],
+    "code:gen": ["bigcode/starcoder", "Salesforce/codegen-6B-multi"],
+    "image:sdxl": ["stabilityai/stable-diffusion-xl-base-1.0"],
+    "image:dalle3": ["openai/dall-e-3"],  # conceptual placeholder
+    "vision:vqa": ["Salesforce/blip-vqa-large"],
+    "speech:stt": ["openai/whisper-large-v2"],
+    "audio:tts": ["elevenlabs"],
+    "text:embed": [EMBED_MODEL_NAME],
+    "text:summarization": ["facebook/bart-large-cnn"],
 }
 
-MODEL_CACHE: Dict[str, Any] = {}  # key -> loaded pipeline/model object
+MODEL_CACHE: Dict[str, Any] = {}
 
-def get_best_model_id(category_key: str) -> Optional[str]:
-    lst = MODEL_REGISTRY.get(category_key, [])
+def get_best_model_id(key: str) -> Optional[str]:
+    lst = MODEL_REGISTRY.get(key, [])
     return lst[0] if lst else None
 
-# --------------------------- Lazy loaders ---------------------------
+# ---------------- lazy loaders ----------------
 def lazy_load_text_local(preferred: List[str]):
-    """
-    Try to load a text model locally. Skips extremely large models if environment
-    doesn't have GPU or transformers support. Returns (tokenizer, model), model_id.
-    """
     key = "text:local"
     if key in MODEL_CACHE:
         return MODEL_CACHE[key], MODEL_CACHE.get(f"{key}:id")
     if torch is None or AutoTokenizer is None or AutoModelForCausalLM is None:
         return None, preferred[0] if preferred else None
     for mid in preferred:
-        # Avoid loading absurdly large models by default; let user control via env
+        if "405b" in mid.lower() and not USE_LLAMA_405B:
+            continue
         try:
-            logger.info("Attempting to load local text model %s", mid)
             tok = AutoTokenizer.from_pretrained(mid, use_fast=True)
             model = AutoModelForCausalLM.from_pretrained(mid, torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32, device_map="auto")
             MODEL_CACHE[key] = (tok, model)
             MODEL_CACHE[f"{key}:id"] = mid
+            logger.info("Loaded local model %s", mid)
             return (tok, model), mid
-        except Exception as e:
-            logger.warning("Local text load failed for %s: %s", mid, e)
+        except Exception:
+            logger.exception("Failed to load local text model %s", exc_info=True)
             continue
     return None, preferred[0] if preferred else None
 
@@ -213,21 +209,18 @@ def lazy_load_sdxl_local():
     if key in MODEL_CACHE:
         return MODEL_CACHE[key]
     if StableDiffusionPipeline is None or torch is None:
-        logger.info("StableDiffusionPipeline or torch not available locally")
         return None
     model_id = get_best_model_id("image:sdxl")
-    if not model_id:
-        return None
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info("Loading SDXL local pipeline %s on %s", model_id, device)
         pipe = StableDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16 if device == "cuda" else torch.float32)
         if device == "cuda":
             pipe = pipe.to("cuda")
         MODEL_CACHE[key] = pipe
+        logger.info("Loaded SDXL local pipeline")
         return pipe
-    except Exception as e:
-        logger.exception("Failed to load SDXL locally: %s", e)
+    except Exception:
+        logger.exception("Failed to load SDXL", exc_info=True)
         return None
 
 def lazy_load_whisper_local():
@@ -239,12 +232,13 @@ def lazy_load_whisper_local():
     try:
         w = WhisperModel(get_best_model_id("speech:stt") or "openai/whisper-large-v2")
         MODEL_CACHE[key] = w
+        logger.info("Loaded Whisper local model")
         return w
-    except Exception as e:
-        logger.exception("Failed to load Whisper locally: %s", e)
+    except Exception:
+        logger.exception("Failed to load Whisper", exc_info=True)
         return None
 
-# --------------------------- Hugging Face Inference wrappers ---------------------------
+# ---------------- HF inference helpers ----------------
 def hf_inference_request(model_id: str, inputs, params: dict = None, timeout: int = 120):
     if not HF_TOKEN:
         raise RuntimeError("HF_TOKEN not set")
@@ -252,19 +246,15 @@ def hf_inference_request(model_id: str, inputs, params: dict = None, timeout: in
         raise RuntimeError("httpx not available")
     url = f"https://api-inference.huggingface.co/models/{model_id}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    try:
-        if isinstance(inputs, (bytes, bytearray)):
-            r = httpx.post(url, headers=headers, content=inputs, timeout=timeout)
-        else:
-            body = {"inputs": inputs}
-            if params:
-                body["parameters"] = params
-            r = httpx.post(url, headers=headers, json=body, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        logger.exception("HF inference request failed for %s: %s", model_id, e)
-        raise
+    if isinstance(inputs, (bytes, bytearray)):
+        r = httpx.post(url, headers=headers, content=inputs, timeout=timeout)
+    else:
+        body = {"inputs": inputs}
+        if params:
+            body["parameters"] = params
+        r = httpx.post(url, headers=headers, json=body, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
 
 async def hf_inference_async(model_id: str, inputs, params: dict = None, timeout: int = 120):
     if not HF_TOKEN:
@@ -273,22 +263,150 @@ async def hf_inference_async(model_id: str, inputs, params: dict = None, timeout
         raise RuntimeError("httpx not available")
     url = f"https://api-inference.huggingface.co/models/{model_id}"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            if isinstance(inputs, (bytes, bytearray)):
-                resp = await client.post(url, headers=headers, content=inputs)
-            else:
-                body = {"inputs": inputs}
-                if params:
-                    body["parameters"] = params
-                resp = await client.post(url, headers=headers, json=body)
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as e:
-        logger.exception("HF async inference failed: %s", e)
-        raise
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        if isinstance(inputs, (bytes, bytearray)):
+            resp = await client.post(url, headers=headers, content=inputs)
+        else:
+            body = {"inputs": inputs}
+            if params:
+                body["parameters"] = params
+            resp = await client.post(url, headers=headers, json=body)
+        resp.raise_for_status()
+        return resp.json()
 
-# --------------------------- Pydantic Request models ---------------------------
+# ---------------- RAG (Milvus) helpers ----------------
+_EMBED_MODEL = None
+
+def get_embed_model():
+    global _EMBED_MODEL
+    if _EMBED_MODEL is None:
+        if SentenceTransformer is None:
+            raise RuntimeError("sentence-transformers not installed")
+        _EMBED_MODEL = SentenceTransformer(EMBED_MODEL_NAME)
+    return _EMBED_MODEL
+
+def init_milvus():
+    if connections is None:
+        logger.debug("pymilvus not installed — skipping Milvus init")
+        return False
+    try:
+        connections.connect(host=MILVUS_HOST, port=MILVUS_PORT)
+        try:
+            existing = Collection.list()
+        except Exception:
+            existing = []
+        if "zynara_embeddings" not in [c.name for c in existing]:
+            fields = [
+                FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, max_length=64),
+                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=768),
+                FieldSchema(name="meta", dtype=DataType.VARCHAR, max_length=4096),
+            ]
+            schema = CollectionSchema(fields, description="zynara embeddings")
+            Collection("zynara_embeddings", schema)
+        logger.info("Milvus initialized")
+        return True
+    except Exception:
+        logger.exception("Milvus init failed")
+        return False
+
+def rag_upsert(doc_id: str, text: str, meta: dict = None):
+    if Collection is None:
+        raise RuntimeError("milvus not available")
+    col = Collection("zynara_embeddings")
+    emb = get_embed_model().encode([text], convert_to_numpy=True)[0].astype("float32")
+    meta_json = json.dumps(meta or {})
+    col.insert([[doc_id], [emb.tolist()], [meta_json]])
+    col.flush()
+
+def rag_query(text: str, k: int = 5):
+    if Collection is None:
+        return []
+    col = Collection("zynara_embeddings")
+    emb = get_embed_model().encode([text], convert_to_numpy=True)[0].astype("float32")
+    search_params = {"metric_type": "IP", "params": {"nprobe": 10}}
+    res = col.search([emb.tolist()], "embedding", param=search_params, limit=k, output_fields=["meta"])
+    out = []
+    for r in res[0]:
+        try:
+            meta_field = json.loads(r.entity.get("meta")) if r.entity.get("meta") else None
+        except Exception:
+            meta_field = None
+        out.append({"id": r.id, "score": r.distance, "meta": meta_field})
+    return out
+
+# ---------------- Rate limiting (in-memory, can back to Redis) ----------------
+RATE_LIMIT: Dict[str, Tuple[float, float]] = {}
+RATE_TOKENS = int(os.getenv("RATE_TOKENS", "120"))
+RATE_WINDOW = int(os.getenv("RATE_WINDOW", "60"))
+
+def consume_token(user_id: str, cost: int = 1) -> bool:
+    now = time.time()
+    tokens, last = RATE_LIMIT.get(user_id, (RATE_TOKENS, now))
+    elapsed = now - last
+    refill = (elapsed / RATE_WINDOW) * RATE_TOKENS
+    tokens = min(RATE_TOKENS, tokens + refill)
+    if tokens < cost:
+        RATE_LIMIT[user_id] = (tokens, now)
+        return False
+    tokens -= cost
+    RATE_LIMIT[user_id] = (tokens, now)
+    return True
+
+# ---------------- vLLM/TGI streaming client helper ----------------
+async def stream_from_vllm(prompt: str, websocket: WebSocket, max_tokens: int = 512):
+    """
+    Connect to vLLM/TGI streaming endpoint (VLLM_URL) and forward tokens to the websocket client.
+    Supports SSE-like or NDJSON streaming formats and naive fallback to text chunks.
+    """
+    if not VLLM_URL or httpx is None:
+        raise RuntimeError("vLLM not configured or httpx missing")
+    payload = {"prompt": prompt, "max_tokens": max_tokens, "stream": True}
+    timeout = None
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("POST", f"{VLLM_URL}/v1/generate", json=payload) as resp:
+            resp.raise_for_status()
+            async for chunk in resp.aiter_text():
+                # Parse lines that may be "data: {...}" or JSON per-line
+                for line in chunk.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        if line.startswith("data:"):
+                            part = line[len("data:"):].strip()
+                            if part == "[DONE]":
+                                await websocket.send_json({"done": True})
+                                return
+                            obj = json.loads(part)
+                            tok = obj.get("token") or obj.get("text") or obj.get("delta")
+                            if tok:
+                                await websocket.send_json({"delta": tok})
+                            else:
+                                # send entire object fallback
+                                await websocket.send_json({"delta": obj})
+                        else:
+                            # try JSON
+                            try:
+                                obj = json.loads(line)
+                                tok = obj.get("token") or obj.get("text") or obj.get("delta")
+                                if tok:
+                                    await websocket.send_json({"delta": tok})
+                                else:
+                                    await websocket.send_json({"delta": obj})
+                            except Exception:
+                                # plain text chunk
+                                await websocket.send_json({"delta": line})
+                    except Exception:
+                        # best-effort forward
+                        try:
+                            await websocket.send_json({"delta": line})
+                        except Exception:
+                            pass
+    try:
+        await websocket.send_json({"done": True})
+    except Exception:
+        pass
+
+# ---------------- Pydantic request models ----------------
 class GenerateRequest(BaseModel):
     prompt: str
     max_tokens: int = 512
@@ -308,23 +426,573 @@ class TTSRequest(BaseModel):
     voice: Optional[str] = None
     format: str = "mp3"
 
-ELEVEN_VOICES = ["alloy","bella","dennis","clara","mike","emma","sophia"]
+# ============================
+# main.py — Zynara Ultra v5 (PART 2/3)
+# Image / Video / Audio pipelines, TTS/STT, code-exec sandbox stubs, worker hooks
+# ============================
 
-# --------------------------- Adaptive memory (Supabase/Redis) ---------------------------
+# ---------------- Image generation & utilities ----------------
+@app.post("/image/generate")
+async def image_generate(req: ImageGenRequest):
+    """
+    Multi-backend image generation:
+      - If model_hint contains 'dalle' or VLLM/OpenAI DALL·E3 available -> use HF/OpenAI endpoint
+      - Else try local SDXL pipeline
+      - Else fallback to HF SDXL inference
+    Returns base64-encoded PNG images (list)
+    """
+    prompt = req.prompt
+    model_hint = (req.model_hint or "image:sdxl").lower()
+
+    # Prefer DALL·E3 via HF/OpenAI if explicitly requested
+    if "dalle" in model_hint:
+        # TODO: Replace with direct OpenAI DALL·E3 call when available
+        model_id = get_best_model_id("image:dalle3") or get_best_model_id("image:sdxl")
+        if HF_TOKEN and model_id:
+            try:
+                resp = await hf_inference_async(model_id, {"inputs": prompt, "parameters": {"width": req.width, "height": req.height, "num_images": req.samples}})
+                return {"source": "hf", "result": resp}
+            except Exception:
+                logger.exception("HF DALL·E request failed", exc_info=True)
+
+    # Try local SDXL
+    if USE_LOCAL_SDXL:
+        pipe = lazy_load_sdxl_local()
+        if pipe:
+            images_b64 = []
+            for _ in range(max(1, req.samples)):
+                try:
+                    out = pipe(prompt, guidance_scale=7.5, num_inference_steps=28, height=req.height, width=req.width)
+                    img = out.images[0]
+                    buf = io.BytesIO()
+                    img.save(buf, format="PNG")
+                    buf.seek(0)
+                    images_b64.append(base64.b64encode(buf.read()).decode())
+                except Exception:
+                    logger.exception("Local SDXL generation failed", exc_info=True)
+            if images_b64:
+                return {"source": "sdxl_local", "images": images_b64}
+
+    # HF fallback SDXL
+    if HF_TOKEN:
+        try:
+            model_id = get_best_model_id("image:sdxl")
+            if model_id:
+                resp = await hf_inference_async(model_id, {"inputs": prompt, "parameters": {"width": req.width, "height": req.height, "num_images": req.samples}})
+                return {"source": "hf", "result": resp}
+        except Exception:
+            logger.exception("HF SDXL fallback failed", exc_info=True)
+
+    raise HTTPException(503, detail="No image generation backend available")
+
+# ---------------- Image utilities: upscale, remove background, style transfer ----------------
+@app.post("/image/upscale")
+async def image_upscale(file: UploadFile = File(...)):
+    """
+    Upscale via HF Real-ESRGAN if available, else return error.
+    """
+    data = await file.read()
+    tmp = write_temp_file(data, ".png")
+    model_id = get_best_model_id("image:upscale")
+    if HF_TOKEN and model_id:
+        try:
+            resp = await hf_inference_async(model_id, open(tmp, "rb").read())
+            return {"source": "hf", "result": resp}
+        except Exception:
+            logger.exception("HF upscale failed", exc_info=True)
+    # TODO: integrate local Real-ESRGAN if installed
+    raise HTTPException(503, detail="Upscale unavailable")
+
+@app.post("/image/remove_bg")
+async def image_remove_bg(file: UploadFile = File(...)):
+    """
+    Background removal using an inpainting model or external library.
+    """
+    data = await file.read()
+    tmp = write_temp_file(data, ".png")
+    model_id = get_best_model_id("image:inpaint")
+    if HF_TOKEN and model_id:
+        try:
+            resp = await hf_inference_async(model_id, open(tmp, "rb").read())
+            return {"source": "hf", "result": resp}
+        except Exception:
+            logger.exception("HF inpaint failed", exc_info=True)
+    # TODO: integrate rembg or MODNet locally
+    raise HTTPException(503, detail="BG removal unavailable")
+
+@app.post("/image/style_transfer")
+async def image_style_transfer(image: UploadFile = File(...), style: str = Form(...)):
+    """
+    Style transfer using HF or placeholder.
+    """
+    data = await image.read()
+    tmp = write_temp_file(data, ".png")
+    model_id = get_best_model_id("image:style_transfer") or get_best_model_id("image:sdxl")
+    if HF_TOKEN and model_id:
+        try:
+            resp = await hf_inference_async(model_id, {"image": open(tmp, "rb").read(), "style": style})
+            return {"source": "hf", "result": resp}
+        except Exception:
+            logger.exception("HF style transfer failed", exc_info=True)
+    raise HTTPException(503, detail="Style transfer unavailable")
+
+# ---------------- TTS endpoint (ElevenLabs + fallback) ----------------
+@app.post("/tts")
+async def tts(req: TTSRequest):
+    voice = (req.voice or "alloy").lower()
+    if httpx and ELEVEN_API_KEY:
+        try:
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
+            headers = {"xi-api-key": ELEVEN_API_KEY}
+            payload = {"text": req.text}
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(url, json=payload, headers=headers)
+                r.raise_for_status()
+                return StreamingResponse(io.BytesIO(r.content), media_type="audio/mpeg")
+        except Exception:
+            logger.exception("ElevenLabs TTS failed", exc_info=True)
+    # TODO: integrate local TTS models (Coqui TTS / VITS) as fallback
+    raise HTTPException(503, detail="TTS unavailable")
+
+# ---------------- STT endpoint ----------------
+@app.post("/stt")
+async def stt(file: UploadFile = File(...)):
+    """
+    Accept audio file and return transcript.
+    """
+    data = await file.read()
+    tmp = write_temp_file(data, ".wav")
+    if USE_LOCAL_WHISPER:
+        whisper = lazy_load_whisper_local()
+        if whisper:
+            try:
+                segments, info = whisper.transcribe(tmp)
+                text = " ".join([s.text for s in segments])
+                return {"text": text}
+            except Exception:
+                logger.exception("Local whisper failed", exc_info=True)
+    # HF fallback if configured
+    if HF_TOKEN:
+        try:
+            stt_model = get_best_model_id("speech:stt")
+            if stt_model:
+                resp = hf_inference_request(stt_model, open(tmp, "rb").read())
+                # normalization
+                if isinstance(resp, dict) and "text" in resp:
+                    return {"text": resp["text"]}
+                if isinstance(resp, list) and resp and isinstance(resp[0], dict) and "text" in resp[0]:
+                    return {"text": resp[0]["text"]}
+                return {"text": json.dumps(resp)}
+        except Exception:
+            logger.exception("HF STT failed", exc_info=True)
+    raise HTTPException(503, detail="STT unavailable")
+
+# ---------------- Code execution sandbox (secure) ----------------
+# NOTE: This is a simplified, illustrative sandbox. For production you must use strong isolation
+# (containers, seccomp, network disabled, resource limits, ephemeral VMs).
+async def run_code_in_sandbox(code: str, language: str = "python", timeout: int = 20) -> Dict[str, Any]:
+    """
+    Execute code securely in an isolated environment (placeholder).
+    For production: use firecracker, gVisor, docker-in-docker with strict limits.
+    """
+    # For Python only: naive exec with time/IO limits (DANGEROUS — demo only)
+    if language.lower() in ("python", "py"):
+        try:
+            # Write to temporary file and run via subprocess in a docker container in real-world
+            import subprocess, tempfile, shlex
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as tf:
+                tf.write(code)
+                tf.flush()
+                cmd = f"python {shlex.quote(tf.name)}"
+                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    out, err = proc.communicate(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    return {"success": False, "error": "timeout"}
+                return {"success": proc.returncode == 0, "stdout": out.decode(errors="ignore"), "stderr": err.decode(errors="ignore")}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    else:
+        # TODO: integrate multi-language runners using ephemeral containers or cloud functions
+        return {"success": False, "error": "language not supported in demo sandbox"}
+
+@app.post("/code/run")
+async def code_run(code: str = Form(...), language: str = Form("python")):
+    res = await run_code_in_sandbox(code, language)
+    return res
+
+# ---------------- Video processing worker (detailed) ----------------
+@app.post("/video/process")
+async def video_process(file: UploadFile = File(...)):
+    """
+    Full video pipeline:
+      - Save file
+      - Extract audio (ffmpeg)
+      - Transcribe (Whisper local or HF)
+      - Extract keyframes (ffmpeg)
+      - Optionally generate stylized frames (SDXL/DALL·E)
+      - Summarize transcript (local HF)
+    """
+    data = await file.read()
+    tmp_video = write_temp_file(data, ".mp4")
+    try:
+        # Extract audio
+        audio_path = os.path.splitext(tmp_video)[0] + "_audio.wav"
+        if ffmpeg:
+            try:
+                (
+                    ffmpeg
+                    .input(tmp_video)
+                    .output(audio_path, format="wav", acodec="pcm_s16le", ac=1, ar="16000")
+                    .overwrite_output()
+                    .run(quiet=True)
+                )
+            except Exception:
+                logger.exception("ffmpeg audio extraction failed", exc_info=True)
+                audio_path = None
+        else:
+            audio_path = None
+
+        # Transcribe audio
+        transcript = ""
+        if audio_path:
+            whisper = lazy_load_whisper_local() if USE_LOCAL_WHISPER else None
+            if whisper:
+                try:
+                    segments, info = whisper.transcribe(audio_path)
+                    transcript = " ".join([s.text for s in segments])
+                except Exception:
+                    logger.exception("whisper transcribe failed", exc_info=True)
+                    transcript = ""
+            elif HF_TOKEN:
+                try:
+                    stt_model = get_best_model_id("speech:stt")
+                    if stt_model:
+                        resp = hf_inference_request(stt_model, open(audio_path, "rb").read())
+                        if isinstance(resp, dict) and "text" in resp:
+                            transcript = resp["text"]
+                        elif isinstance(resp, list) and resp and isinstance(resp[0], dict) and "text" in resp[0]:
+                            transcript = resp[0]["text"]
+                        else:
+                            transcript = json.dumps(resp)[:8000]
+                except Exception:
+                    logger.exception("HF STT failed", exc_info=True)
+
+        # Extract keyframes (every 3 seconds)
+        frames_dir = os.path.splitext(tmp_video)[0] + "_frames"
+        os.makedirs(frames_dir, exist_ok=True)
+        frames = []
+        if ffmpeg:
+            try:
+                frame_pattern = os.path.join(frames_dir, "frame_%04d.jpg")
+                (
+                    ffmpeg
+                    .input(tmp_video)
+                    .filter('fps', fps=1/3)
+                    .output(frame_pattern, qscale=2)
+                    .overwrite_output()
+                    .run(quiet=True)
+                )
+                for fname in sorted(os.listdir(frames_dir)):
+                    if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                        frames.append(os.path.join(frames_dir, fname))
+            except Exception:
+                logger.exception("ffmpeg frame extraction failed", exc_info=True)
+
+        # Generate stylized frames (limit)
+        generated_frames = []
+        if frames:
+            pipe = lazy_load_sdxl_local()
+            dalle_id = get_best_model_id("image:dalle3")
+            for fpath in frames[:8]:
+                try:
+                    if pipe:
+                        # Optionally use the original frame as conditioning (ControlNet/conditioning not implemented here)
+                        prompt = f"Stylize this frame: {os.path.basename(fpath)}"
+                        img = pipe(prompt, height=512, width=512).images[0]
+                        b = io.BytesIO()
+                        img.save(b, format="PNG")
+                        b.seek(0)
+                        generated_frames.append({"source": "sdxl", "frame": os.path.basename(fpath), "image_b64": base64.b64encode(b.read()).decode()})
+                    elif HF_TOKEN and dalle_id:
+                        resp = hf_inference_request(dalle_id, {"inputs": f"Sora2 style render of {os.path.basename(fpath)}", "parameters": {"num_images": 1}})
+                        generated_frames.append({"source": "dalle", "frame": os.path.basename(fpath), "result": resp})
+                    else:
+                        generated_frames.append({"frame": os.path.basename(fpath), "note": "no image model"})
+                except Exception:
+                    logger.exception("per-frame generation failed", exc_info=True)
+                    generated_frames.append({"frame": os.path.basename(fpath), "note": "failed"})
+
+        # Summarize transcript
+        summary = ""
+        if transcript:
+            try:
+                local_obj, local_id = lazy_load_text_local(MODEL_REGISTRY.get("text:chat", []))
+                if local_obj:
+                    tok, model = local_obj
+                    prompt_sum = f"Summarize the following transcript:\n\n{transcript}\n\nTl;dr:"
+                    inputs = tok.encode(prompt_sum, return_tensors="pt").to(next(model.parameters()).device)
+                    out = model.generate(inputs, max_new_tokens=150)
+                    summary = tok.decode(out[0], skip_special_tokens=True)
+                elif HF_TOKEN:
+                    sm = get_best_model_id("text:summarization")
+                    if sm:
+                        resp = hf_inference_request(sm, transcript, params={"max_new_tokens": 150})
+                        if isinstance(resp, dict) and "summary_text" in resp:
+                            summary = resp["summary_text"]
+                        else:
+                            summary = json.dumps(resp)[:2000]
+            except Exception:
+                logger.exception("summarization failed", exc_info=True)
+                summary = "(summarization failed)"
+
+        return {"video_path": tmp_video, "audio_path": audio_path, "transcript": transcript, "summary": summary, "frames": frames, "generated_frames": generated_frames}
+    except Exception:
+        logger.exception("video pipeline failed", exc_info=True)
+        raise HTTPException(500, detail="video processing failed")
+
+# ---------------- Image worker and job queue stubs ----------------
+# For production: replace with Celery/RQ + Redis + GPU workers
+IMAGE_JOB_QUEUE: List[Dict[str, Any]] = []
+
+@app.post("/worker/image/enqueue")
+async def enqueue_image_job(prompt: str = Form(...), user_id: str = Form("guest")):
+    job_id = uuid.uuid4().hex
+    IMAGE_JOB_QUEUE.append({"job_id": job_id, "prompt": prompt, "user_id": user_id, "status": "queued", "created_at": now_ts()})
+    return {"job_id": job_id}
+
+@app.get("/worker/image/status")
+async def get_image_job_status(job_id: str):
+    for job in IMAGE_JOB_QUEUE:
+        if job["job_id"] == job_id:
+            return job
+    raise HTTPException(404, detail="job not found")
+
+# ---------------- Basic utilities endpoints ----------------
+@app.get("/models")
+def list_models():
+    return {"models": MODEL_REGISTRY, "local_cache": list(MODEL_CACHE.keys())}
+
+# ============================
+# main.py — Zynara Ultra v5 (PART 3/3)
+# Agents, memory, fusion, admin, startup, run
+# ============================
+
+# ---------------- Agents & Tool Runtime ----------------
+# Lightweight agent scaffolding that composes tools (text generation, image, code, video)
+AGENTS: Dict[str, Dict[str, Any]] = {}  # agent_id -> metadata
+
+async def agent_run_loop(agent_id: str, spec: Dict[str, Any]):
+    """
+    Very simple autonomous agent loop:
+    - spec: {"task": "...", "tools": ["generate","image","code","video"], "user_id": "..."}
+    - This loop runs a fixed number of steps and uses tools via internal function calls.
+    NOTE: For production use AutoGen, LangChain or custom orchestrator with safety & sandboxing.
+    """
+    AGENTS[agent_id]["status"] = "running"
+    task_description = spec.get("task", "")
+    user_id = spec.get("user_id", "guest")
+    max_steps = int(spec.get("max_steps", 4))
+    memory_key = f"agent:{agent_id}:history"
+    history = []
+
+    try:
+        for step in range(max_steps):
+            # 1) create a plan step using generate_text
+            gen_req = GenerateRequest(prompt=f"Agent planning step {step+1}/{max_steps} for task: {task_description}", max_tokens=256)
+            # Call internal generate_text via async call
+            try:
+                resp = await generate_text(gen_req, user_id=user_id)
+                plan_text = resp.get("text") if isinstance(resp, dict) else str(resp)
+            except Exception as e:
+                plan_text = f"(planning failed: {e})"
+            history.append({"step": step+1, "plan": plan_text})
+
+            # 2) choose a tool naively by keyword
+            chosen_tool = None
+            plan_lower = plan_text.lower() if isinstance(plan_text, str) else ""
+            if "image" in plan_lower or "draw" in plan_lower or "render" in plan_lower:
+                chosen_tool = "image"
+            elif "code" in plan_lower or "script" in plan_lower or "function" in plan_lower:
+                chosen_tool = "code"
+            elif "video" in plan_lower or "clip" in plan_lower:
+                chosen_tool = "video"
+            else:
+                chosen_tool = "text"
+
+            # 3) execute tool
+            result = {"tool": chosen_tool, "output": None}
+            try:
+                if chosen_tool == "image":
+                    img_req = ImageGenRequest(prompt=plan_text, width=512, height=512, samples=1)
+                    img_out = await image_generate(img_req)
+                    result["output"] = img_out
+                elif chosen_tool == "code":
+                    code_out = await run_code_in_sandbox(f'# Agent auto-generated code\n# Prompt: {plan_text}\nprint("Hello from agent step")', language="python")
+                    result["output"] = code_out
+                elif chosen_tool == "video":
+                    # For demo: create a short stylized frame set from plan_text
+                    result["output"] = {"note": "video tool executed (demo)", "plan": plan_text}
+                else:
+                    # text tool: one more generation
+                    gen2_req = GenerateRequest(prompt=f"Agent generate answer for: {plan_text}", max_tokens=256)
+                    gen2_out = await generate_text(gen2_req, user_id=user_id)
+                    result["output"] = gen2_out
+            except Exception as e:
+                logger.exception("Agent tool call failed", exc_info=True)
+                result["output"] = {"error": str(e)}
+
+            history.append({"step_result": result})
+
+            # 4) store intermediate memory (best-effort)
+            try:
+                await memory_store(user_id, f"{memory_key}:step{step+1}", {"plan": plan_text, "result": result, "ts": now_ts()})
+            except Exception:
+                pass
+
+            # small delay to simulate work
+            await asyncio.sleep(0.5)
+
+        AGENTS[agent_id]["status"] = "finished"
+        AGENTS[agent_id]["result"] = history
+    except Exception:
+        AGENTS[agent_id]["status"] = "error"
+        AGENTS[agent_id]["result"] = {"error": traceback.format_exc()}
+
+# Create agent
+@app.post("/agent/create")
+async def create_agent(task: str = Form(...), user_id: str = Form("guest"), max_steps: int = Form(4)):
+    agent_id = uuid.uuid4().hex
+    AGENTS[agent_id] = {"task": task, "user_id": user_id, "created_at": now_ts(), "status": "queued", "result": None}
+    # Run in background
+    spec = {"task": task, "user_id": user_id, "max_steps": max_steps}
+    asyncio.create_task(agent_run_loop(agent_id, spec))
+    return {"agent_id": agent_id}
+
+@app.get("/agent/status")
+def agent_status(agent_id: str):
+    agent = AGENTS.get(agent_id)
+    if not agent:
+        raise HTTPException(404, detail="agent not found")
+    return agent
+
+@app.get("/agent/list")
+def agent_list():
+    return {"agents": AGENTS}
+
+# ---------------- Fusion Advanced Endpoint ----------------
+@app.post("/fusion/advanced")
+async def fusion_advanced(
+    user_id: str = Form("guest"),
+    text: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+    video: Optional[UploadFile] = File(None),
+    voice_prompt: Optional[str] = Form(None),
+    generate_images_per_video_frame: bool = Form(False),
+):
+    out: Dict[str, Any] = {"user_id": user_id, "results": {}}
+    # process video first (if provided)
+    if video:
+        try:
+            vres = await video_process(video)
+            out["results"]["video"] = vres
+        except Exception as e:
+            out["results"]["video_error"] = str(e)
+    # process image
+    if image:
+        try:
+            img_bytes = await image.read()
+            img_path = write_temp_file(img_bytes, ".png")
+            out_img = {"path": img_path}
+            # try bg removal
+            try:
+                if HF_TOKEN and get_best_model_id("image:inpaint"):
+                    resp = await hf_inference_async(get_best_model_id("image:inpaint"), open(img_path, "rb").read())
+                    out_img["bg_removed"] = True
+                    out_img["bg_resp"] = resp
+                else:
+                    out_img["bg_removed"] = False
+            except Exception:
+                out_img["bg_removed"] = False
+            # upscale attempt
+            try:
+                if HF_TOKEN and get_best_model_id("image:upscale"):
+                    up = await hf_inference_async(get_best_model_id("image:upscale"), open(img_path, "rb").read())
+                    out_img["upscale"] = up
+            except Exception:
+                out_img["upscale"] = None
+            out["results"]["image"] = out_img
+        except Exception as e:
+            out["results"]["image_error"] = str(e)
+
+    # text generation / summarize
+    prompt_source = text or (out.get("results", {}).get("video", {}).get("transcript"))
+    if prompt_source:
+        try:
+            ok, reason = moderate_text_basic(prompt_source)
+            if not ok:
+                out["results"]["text_error"] = reason
+            else:
+                gen_req = GenerateRequest(prompt=prompt_source, max_tokens=256)
+                gen_res = await generate_text(gen_req, user_id=user_id)
+                out["results"]["generated_text"] = gen_res
+        except Exception as e:
+            out["results"]["text_error"] = str(e)
+
+    # voice
+    if voice_prompt:
+        try:
+            tts_req = TTSRequest(text=voice_prompt, voice="alloy")
+            # call tts endpoint internally by calling the function
+            tts_resp = await tts(tts_req)
+            # tts returns StreamingResponse; capture by calling TTS API directly if needed
+            out["results"]["voice"] = "generated (stream)"
+        except Exception as e:
+            out["results"]["voice_error"] = str(e)
+
+    # save to memory
+    try:
+        await memory_store(user_id, f"fusion:{stable_id(json.dumps(out.get('results') or {}))}", {"results": out.get("results"), "ts": now_ts()})
+        out["memory_saved"] = True
+    except Exception:
+        out["memory_saved"] = False
+
+    return out
+
+# ---------------- Memory endpoints ----------------
+@app.post("/memory/store")
+async def api_memory_store(user_id: str = Form(...), key: str = Form(...), value: str = Form(...)):
+    try:
+        ok = await memory_store(user_id, key, {"value": value, "ts": now_ts()})
+        return {"ok": ok}
+    except Exception:
+        logger.exception("memory store failed", exc_info=True)
+        raise HTTPException(500, detail="memory store failed")
+
+@app.get("/memory/fetch")
+async def api_memory_fetch(user_id: str = Query(...), key_prefix: str = Query("")):
+    try:
+        mems = await memory_fetch(user_id, key_prefix)
+        return {"memory": mems}
+    except Exception:
+        logger.exception("memory fetch failed", exc_info=True)
+        raise HTTPException(500, detail="memory fetch failed")
+
 async def memory_store(user_id: str, key: str, value: Dict[str, Any]):
     payload = {"user_id": user_id, "memkey": key, "value": json.dumps(value), "created_at": now_ts()}
     try:
         if supabase:
             supabase.table("memory").insert(payload).execute()
             return True
-    except Exception as e:
-        logger.warning("supabase memory insert failed: %s", e)
+    except Exception:
+        logger.debug("supabase memory insert failed", exc_info=True)
     try:
         if redis_client:
-            redis_client.set(f"mem:{user_id}:{key}", json.dumps(value), ex=60*60*24*7)
+            redis_client.set(f"mem:{user_id}:{key}", json.dumps(value), ex=60 * 60 * 24 * 7)
             return True
     except Exception:
-        pass
+        logger.debug("redis memory insert failed", exc_info=True)
     return False
 
 async def memory_fetch(user_id: str, key_prefix: str = "") -> List[Dict[str, Any]]:
@@ -343,60 +1011,42 @@ async def memory_fetch(user_id: str, key_prefix: str = "") -> List[Dict[str, Any
                         rvalue = r.get("value")
                     out.append({"memkey": r.get("memkey"), "value": rvalue, "created_at": r.get("created_at")})
                 return out
-    except Exception as e:
-        logger.debug("supabase memory fetch failed: %s", e)
-    # Redis fallback
-    try:
-        if redis_client and key_prefix:
-            keys = redis_client.keys(f"mem:{user_id}:{key_prefix}*")
-            for k in keys:
-                v = redis_client.get(k)
-                if v:
-                    try:
-                        out.append({"memkey": k.decode().split(":",2)[-1], "value": json.loads(v)})
-                    except Exception:
-                        out.append({"memkey": k.decode().split(":",2)[-1], "value": v.decode()})
     except Exception:
-        pass
+        logger.debug("supabase fetch failed", exc_info=True)
+    try:
+        if redis_client:
+            if key_prefix:
+                keys = redis_client.keys(f"mem:{user_id}:{key_prefix}*")
+            else:
+                keys = redis_client.keys(f"mem:{user_id}:*")
+            for k in keys:
+                try:
+                    kstr = k.decode() if isinstance(k, bytes) else k
+                    v = redis_client.get(k)
+                    if v:
+                        try:
+                            out.append({"memkey": kstr.split(":", 2)[-1], "value": json.loads(v)})
+                        except Exception:
+                            out.append({"memkey": kstr.split(":", 2)[-1], "value": v.decode() if isinstance(v, bytes) else v})
+                except Exception:
+                    continue
+    except Exception:
+        logger.debug("redis fetch failed", exc_info=True)
     return out
 
-# --------------------------- Rate limiting ---------------------------
-RATE_LIMIT = {}  # user_id -> (tokens, last_ts)
-RATE_TOKENS = 60
-RATE_WINDOW = 60
-
-def consume_token(user_id: str, cost: int = 1) -> bool:
-    now = time.time()
-    tokens, last = RATE_LIMIT.get(user_id, (RATE_TOKENS, now))
-    elapsed = now - last
-    refill = (elapsed / RATE_WINDOW) * RATE_TOKENS
-    tokens = min(RATE_TOKENS, tokens + refill)
-    if tokens < cost:
-        RATE_LIMIT[user_id] = (tokens, now)
-        return False
-    tokens -= cost
-    RATE_LIMIT[user_id] = (tokens, now)
-    return True
-
-# --------------------------- Endpoints ---------------------------
-
-@app.get("/")
-def index():
-    return {"app": APP_NAME, "creator": CREATOR, "note": "Zynara Super-Ultimate — multimodal AI backend. Configure HF_TOKEN/OPENAI/ELEVEN/SUPABASE/REDIS."}
-
-# --------------------------- Health & Admin ---------------------------
+# ---------------- Admin / health / metrics ----------------
 @app.get("/health")
 def health():
     return {
         "status": "ok",
         "hf_token": bool(HF_TOKEN),
-        "openai_key": bool(OPENAI_API_KEY),
+        "openai_moderation": bool(OPENAI_API_KEY),
         "eleven": bool(ELEVEN_API_KEY),
         "supabase": bool(supabase),
         "redis": bool(redis_client),
         "torch": bool(torch),
         "sdxl_local": bool(MODEL_CACHE.get("sdxl")),
-        "text_local": bool(MODEL_CACHE.get("text:local"))
+        "vllm_url": VLLM_URL or None,
     }
 
 @app.post("/admin/clear_cache")
@@ -404,702 +1054,46 @@ def admin_clear():
     MODEL_CACHE.clear()
     return {"cleared": True}
 
-@app.post("/fusion/tts_video")
-async def tts_to_video(req: TTSRequest, image: UploadFile = File(...), user_id: str = Form("guest")):
-    ok, reason = moderate_text_basic(req.text)
-    if not ok:
-        raise HTTPException(400, detail=reason or "Blocked")
-    if not consume_token(user_id, cost=3):
-        raise HTTPException(429, detail="Rate limit exceeded")
+@app.get("/admin/metrics")
+def admin_metrics():
+    # lightweight metrics
+    return {
+        "uptime": now_ts(),
+        "agents_count": len(AGENTS),
+        "image_queue_len": len(IMAGE_JOB_QUEUE),
+        "mem_backend": ("supabase" if supabase else "") + (",redis" if redis_client else "")
+    }
 
-    audio_path = None
-    if ELEVEN_API_KEY and httpx:
-        try:
-            voice = req.voice or "alloy"
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
-            headers = {"xi-api-key": ELEVEN_API_KEY, "Accept": "audio/mpeg", "Content-Type": "application/json"}
-            payload = {"text": req.text}
-            r = httpx.post(url, headers=headers, json=payload, timeout=30.0)
-            audio_path = write_temp_file(r.content, ".mp3")
-        except Exception:
-            logger.exception("ElevenLabs TTS failed")
-
-    img_bytes = await image.read()
-    img_path = write_temp_file(img_bytes, ".png")
-    video_path = os.path.join(MEDIA_DIR, f"video_{uuid.uuid4().hex}.mp4")
-
-    try:
-        import moviepy.editor as mpy
-        clip = mpy.ImageClip(img_path).set_duration(5)
-        if audio_path:
-            clip = clip.set_audio(mpy.AudioFileClip(audio_path))
-        clip.write_videofile(video_path, fps=24, verbose=False, logger=None)
-        return FileResponse(video_path, media_type="video/mp4", filename=os.path.basename(video_path))
-    except Exception:
-        logger.exception("Video creation failed")
-        raise HTTPException(500, detail="Video creation failed")
-
-@app.post("/vision/video_pose")
-async def video_pose(file: UploadFile = File(...), user_id: str = Form("guest")):
-    ok, reason = moderate_text_basic(file.filename or "")
-    if not ok:
-        raise HTTPException(400, detail=reason)
-    if not consume_token(user_id, cost=3):
-        raise HTTPException(429, detail="Rate limit exceeded")
-
-    tmp_video = write_temp_file(await file.read(), ".mp4")
-    model_id = get_best_model_id("vision:pose2d")
-    
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, open(tmp_video,"rb").read())
-            return {"source":"hf","pose_data":resp}
-        except Exception:
-            logger.exception("HF video pose detection failed")
-    
-    return JSONResponse({"error":"Video pose detection requires HF model or local pipeline."}, status_code=503)
-
-@app.post("/document/qa")
-async def document_qa(file: UploadFile = File(...), question: str = Form(...), user_id: str = Form("guest")):
-    ok, reason = moderate_text_basic(question)
-    if not ok:
-        raise HTTPException(400, detail=reason)
-    if not consume_token(user_id, cost=3):
-        raise HTTPException(429, detail="Rate limit exceeded")
-
-    tmp_file = write_temp_file(await file.read(), os.path.splitext(file.filename)[1] if file.filename else ".pdf")
-    # Step 1: extract text (placeholder)
-    try:
-        from PyPDF2 import PdfReader
-        reader = PdfReader(tmp_file)
-        doc_text = " ".join([p.extract_text() or "" for p in reader.pages])
-    except Exception:
-        doc_text = "(text extraction failed)"
-
-    # Step 2: run HF LLM to answer
-    model_id = get_best_model_id("text:chat")
-    if HF_TOKEN and model_id:
-        try:
-            prompt = f"Answer this question based on the document: {question}\nDocument: {doc_text[:5000]}"
-            resp = hf_inference_request(model_id, prompt, params={"max_new_tokens":512})
-            if isinstance(resp, dict) and "generated_text" in resp:
-                answer = resp["generated_text"]
-            elif isinstance(resp, list) and resp and isinstance(resp[0], dict) and "generated_text" in resp[0]:
-                answer = resp[0]["generated_text"]
-            else:
-                answer = str(resp)[:2000]
-            return {"source":"hf","answer":answer}
-        except Exception:
-            logger.exception("HF document QA failed")
-
-    return JSONResponse({"error":"Document QA requires HF LLM."}, status_code=503)
-
-
-
-@app.get("/admin/models")
-def admin_models():
-    return {"registry": MODEL_REGISTRY, "loaded": list(MODEL_CACHE.keys())}
-
-# --------------------------- Text generation & chat ---------------------------
-@app.post("/generate")
-def generate_text(req: GenerateRequest, user_id: str = Form("guest")):
-    ok, reason = moderate_text_basic(req.prompt)
-    if not ok:
-        raise HTTPException(400, detail=reason or "Blocked")
-    if not consume_token(user_id, cost=1):
-        raise HTTPException(429, detail="Rate limit exceeded")
-    preferred = MODEL_REGISTRY.get(req.model_hint or "text:chat", MODEL_REGISTRY.get("text:chat", []))
-    local_obj, local_id = lazy_load_text_local(preferred)
-    if local_obj:
-        try:
-            tok, model = local_obj
-            inputs = tok.encode(req.prompt, return_tensors="pt").to(next(model.parameters()).device)
-            out = model.generate(inputs, max_new_tokens=req.max_tokens)
-            text = tok.decode(out[0], skip_special_tokens=True)
-            return {"source": "local", "model_id": local_id, "text": text}
-        except Exception:
-            logger.exception("Local text generation failed")
-    # HF inference fallback
-    if HF_TOKEN and USE_HF_INFERENCE:
-        model_id = local_id or get_best_model_id(req.model_hint or "text:chat")
-        try:
-            resp = hf_inference_request(model_id, req.prompt, params={"max_new_tokens": req.max_tokens, "temperature": req.temperature})
-            # extract text safely
-            if isinstance(resp, dict) and "generated_text" in resp:
-                out_text = resp["generated_text"]
-            elif isinstance(resp, list) and isinstance(resp[0], dict) and "generated_text" in resp[0]:
-                out_text = resp[0]["generated_text"]
-            else:
-                out_text = json.dumps(resp)[:8000]
-            return {"source": "hf", "model_id": model_id, "text": out_text}
-        except Exception as e:
-            logger.exception("HF generation failed: %s", e)
-            raise HTTPException(status_code=500, detail="HF generation failed")
-    raise HTTPException(status_code=503, detail="No text model available")
-
-# --------------------------- WebSocket streaming (chat) ---------------------------
-@app.websocket("/ws/chat")
-async def ws_chat(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        init = await websocket.receive_json()
-        prompt = init.get("prompt", "")
-        user_id = init.get("user_id", "guest")
-        ok, reason = moderate_text_basic(prompt)
-        if not ok:
-            await websocket.send_json({"error": reason})
-            await websocket.close()
-            return
-        if not consume_token(user_id, cost=1):
-            await websocket.send_json({"error":"rate_limit"})
-            await websocket.close()
-            return
-        # Try local streaming (naive chunked approach)
-        preferred = MODEL_REGISTRY.get("text:chat", [])
-        local_obj, local_id = lazy_load_text_local(preferred)
-        if local_obj:
-            try:
-                tok, model = local_obj
-                inputs = tok.encode(prompt, return_tensors="pt").to(next(model.parameters()).device)
-                out = model.generate(inputs, max_new_tokens=1024)
-                text = tok.decode(out[0], skip_special_tokens=True)
-                for i in range(0, len(text), 120):
-                    await websocket.send_json({"delta": text[i:i+120]})
-                    await asyncio.sleep(0.02)
-                await websocket.send_json({"done": True})
-                await websocket.close()
-                return
-            except Exception:
-                logger.exception("Local ws streaming failed")
-        # HF fallback — simulate streaming by chunking final text
-        model_id = get_best_model_id("text:chat")
-        try:
-            resp = hf_inference_request(model_id, prompt, params={"max_new_tokens": 1024})
-            if isinstance(resp, dict) and "generated_text" in resp:
-                text = resp["generated_text"]
-            elif isinstance(resp, list) and resp and isinstance(resp[0], dict) and "generated_text" in resp[0]:
-                text = resp[0]["generated_text"]
-            else:
-                text = json.dumps(resp)[:8000]
-            for i in range(0, len(text), 120):
-                await websocket.send_json({"delta": text[i:i+120]})
-                await asyncio.sleep(0.02)
-            await websocket.send_json({"done": True})
-            await websocket.close()
-            return
-        except Exception:
-            await websocket.send_json({"error": "generation_failed"})
-            await websocket.close()
-            return
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected")
-    except Exception:
-        logger.exception("ws_chat error")
-        try:
-            await websocket.close()
-        except Exception:
-            pass
-
-# --------------------------- Code generation endpoint ---------------------------
-@app.post("/code")
-def code_generate(prompt: str = Form(...), language: str = Form("python"), model_hint: str = Form("code:gen"), user_id: str = Form("guest")):
-    ok, reason = moderate_text_basic(prompt)
-    if not ok:
-        raise HTTPException(400, detail=reason)
-    if not consume_token(user_id, cost=2):
-        raise HTTPException(429, detail="Rate limit exceeded")
-    preferred = MODEL_REGISTRY.get(model_hint, MODEL_REGISTRY.get("code:gen", []))
-    local_obj, local_id = lazy_load_text_local(preferred)
-    if local_obj:
-        try:
-            tok, model = local_obj
-            composed = f"# Language: {language}\n# Request: {prompt}\n\n"
-            inputs = tok.encode(composed, return_tensors="pt").to(next(model.parameters()).device)
-            out = model.generate(inputs, max_new_tokens=1024)
-            code_text = tok.decode(out[0], skip_special_tokens=True)
-            return {"source": "local", "model": local_id, "code": code_text}
-        except Exception:
-            logger.exception("Local code generation failed")
-    # HF fallback
-    if HF_TOKEN and USE_HF_INFERENCE:
-        model_id = local_id or get_best_model_id(model_hint)
-        try:
-            resp = hf_inference_request(model_id, f"Write a {language} program: {prompt}", params={"max_new_tokens": 1024})
-            if isinstance(resp, dict) and "generated_text" in resp:
-                return {"source": "hf", "model": model_id, "code": resp["generated_text"]}
-            return {"source": "hf", "model": model_id, "code_raw": resp}
-        except Exception:
-            logger.exception("HF code gen failed")
-    raise HTTPException(status_code=503, detail="No code model available")
-
-# --------------------------- Image generation (SDXL) ---------------------------
-@app.post("/image/generate")
-async def image_generate(req: ImageGenRequest, user_id: str = Form("guest")):
-    ok, reason = moderate_text_basic(req.prompt)
-    if not ok:
-        raise HTTPException(400, detail=reason)
-    if not consume_token(user_id, cost=3):
-        raise HTTPException(429, detail="Rate limit exceeded")
-    # Try local SDXL
-    sd = lazy_load_sdxl_local()
-    if sd:
-        try:
-            out = sd(req.prompt, num_inference_steps=30, width=req.width, height=req.height, guidance_scale=7.5)
-            img = out.images[0]
-            out_path = os.path.join(MEDIA_DIR, f"img_{uuid.uuid4().hex}.png")
-            img.save(out_path)
-            return FileResponse(out_path, media_type="image/png", filename=os.path.basename(out_path))
-        except Exception:
-            logger.exception("Local SDXL failed")
-    # HF inference fallback
-    if HF_TOKEN and USE_HF_INFERENCE:
-        model_id = get_best_model_id(req.model_hint or "image:sdxl")
-        try:
-            resp = await hf_inference_async(model_id, {"prompt": req.prompt, "width": req.width, "height": req.height}, timeout=180)
-            # handle common HF return shapes (base64 or url)
-            if isinstance(resp, dict) and "images" in resp:
-                b64 = resp["images"][0]
-                import base64
-                img_bytes = base64.b64decode(b64)
-                path = write_temp_file(img_bytes, ".png")
-                return FileResponse(path, media_type="image/png", filename=os.path.basename(path))
-            return JSONResponse({"source": "hf", "result": resp})
-        except Exception:
-            logger.exception("HF image gen failed")
-    raise HTTPException(status_code=503, detail="No image generator available")
-
-# --------------------------- Image inpaint / remove_bg / upscale / style transfer ---------------------------
-@app.post("/image/inpaint")
-async def inpaint(image: UploadFile = File(...), mask: UploadFile = File(...), prompt: str = Form(""), user_id: str = Form("guest")):
-    tmp_image = write_temp_file(await image.read(), os.path.splitext(image.filename)[1] if image.filename else ".png")
-    tmp_mask = write_temp_file(await mask.read(), os.path.splitext(mask.filename)[1] if mask.filename else ".png")
-    model_id = get_best_model_id("image:inpaint")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, {"image": open(tmp_image, "rb").read(), "mask": open(tmp_mask, "rb").read(), "prompt": prompt})
-            return JSONResponse({"source": "hf", "result": resp})
-        except Exception:
-            logger.exception("HF inpaint failed")
-    raise HTTPException(status_code=503, detail="Inpaint unavailable")
-
-@app.post("/image/upscale")
-async def upscale(image: UploadFile = File(...), scale: int = Form(2), user_id: str = Form("guest")):
-    tmp_image = write_temp_file(await image.read(), os.path.splitext(image.filename)[1] if image.filename else ".png")
-    model_id = get_best_model_id("image:upscale")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, open(tmp_image, "rb").read(), params={"scale": scale})
-            return JSONResponse({"source":"hf","result":resp})
-        except Exception:
-            logger.exception("HF upscale failed")
-    raise HTTPException(status_code=503, detail="Upscaler unavailable")
-
-@app.post("/image/style_transfer")
-async def style_transfer(image: UploadFile = File(...), style: str = Form(...), user_id: str = Form("guest")):
-    tmp = write_temp_file(await image.read(), ".png")
-    model_id = get_best_model_id("image:style_transfer")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, {"image": open(tmp,"rb").read(), "style": style})
-            return JSONResponse({"source":"hf","result":resp})
-        except Exception:
-            logger.exception("style transfer failed")
-    raise HTTPException(status_code=503, detail="Style transfer unavailable")
-
-# --------------------------- Vision: caption / vqa / detect / ocr / pose --------------------------------
-@app.post("/vision/caption")
-async def caption(image: UploadFile = File(...), user_id: str = Form("guest")):
-    tmp = write_temp_file(await image.read(), ".png")
-    model_id = get_best_model_id("vision:caption")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, open(tmp,"rb").read())
-            return JSONResponse({"source":"hf","caption":resp})
-        except Exception:
-            logger.exception("HF caption failed")
-    raise HTTPException(status_code=503, detail="Caption model unavailable")
-
-@app.post("/vision/vqa")
-async def vqa(image: UploadFile = File(...), question: str = Form(...), user_id: str = Form("guest")):
-    tmp = write_temp_file(await image.read(), ".png")
-    model_id = get_best_model_id("vision:vqa")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, {"image": open(tmp,"rb").read(), "question": question})
-            return JSONResponse({"source":"hf","answer":resp})
-        except Exception:
-            logger.exception("HF vqa failed")
-    raise HTTPException(status_code=503, detail="VQA model unavailable")
-
-@app.post("/vision/detect")
-async def detect(image: UploadFile = File(...), user_id: str = Form("guest")):
-    tmp = write_temp_file(await image.read(), ".jpg")
-    model_id = get_best_model_id("vision:detector")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, open(tmp,"rb").read())
-            return JSONResponse({"source":"hf","result":resp})
-        except Exception:
-            logger.exception("HF detection failed")
-    raise HTTPException(status_code=503, detail="Object detection unavailable")
-
-@app.post("/vision/ocr")
-async def ocr(image: UploadFile = File(...), user_id: str = Form("guest")):
-    tmp = write_temp_file(await image.read(), ".png")
-    model_id = get_best_model_id("vision:ocr")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, open(tmp,"rb").read())
-            return JSONResponse({"source":"hf","text":resp})
-        except Exception:
-            logger.exception("HF ocr failed")
-    raise HTTPException(status_code=503, detail="OCR unavailable")
-
-@app.post("/vision/pose2anim")
-async def pose2anim(image: UploadFile = File(...), user_id: str = Form("guest")):
-    tmp = write_temp_file(await image.read(), ".png")
-    model_id = get_best_model_id("vision:pose2anim")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, open(tmp,"rb").read())
-            return JSONResponse({"source":"hf","animation":resp})
-        except Exception:
-            logger.exception("HF pose2anim failed")
-    raise HTTPException(status_code=503, detail="Pose-to-animation unavailable")
-
-# --------------------------- Document parsing / Layout / PDF --------------------------------
-@app.post("/document/parse")
-async def document_parse(file: UploadFile = File(...), user_id: str = Form("guest")):
-    tmp = write_temp_file(await file.read(), ".pdf")
-    model_id = get_best_model_id("document:layoutlm")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, open(tmp,"rb").read())
-            return JSONResponse({"source":"hf","parsed":resp})
-        except Exception:
-            logger.exception("Document parse failed")
-    raise HTTPException(status_code=503, detail="Document parse unavailable")
-
-# --------------------------- Speech: STT & TTS & voice cloning ---------------------------
-@app.post("/stt")
-async def stt(file: UploadFile = File(...), user_id: str = Form("guest")):
-    tmp = write_temp_file(await file.read(), os.path.splitext(file.filename)[1] if file.filename else ".wav")
-    whisper = lazy_load_whisper_local()
-    if whisper:
-        try:
-            segments, info = whisper.transcribe(tmp)
-            text = " ".join([s.text for s in segments])
-            return {"source":"local","text":text}
-        except Exception:
-            logger.exception("Local whisper failed")
-    model_id = get_best_model_id("speech:stt")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, open(tmp,"rb").read())
-            return {"source":"hf","result":resp}
-        except Exception:
-            logger.exception("HF stt failed")
-    raise HTTPException(status_code=503, detail="STT unavailable")
-
-@app.post("/tts")
-async def tts(req: TTSRequest, user_id: str = Form("guest")):
-    ok, reason = moderate_text_basic(req.text)
-    if not ok:
-        raise HTTPException(400, detail=reason or "Blocked")
-    # Prefer ElevenLabs if configured
-    if ELEVEN_API_KEY and httpx:
-        try:
-            voice = req.voice or "alloy"
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
-            headers = {"xi-api-key": ELEVEN_API_KEY, "Accept": "audio/mpeg", "Content-Type": "application/json"}
-            payload = {"text": req.text}
-            r = httpx.post(url, headers=headers, json=payload, timeout=30.0)
-            if r.status_code == 200:
-                path = write_temp_file(r.content, ".mp3")
-                return FileResponse(path, media_type="audio/mpeg")
-            else:
-                logger.warning("ElevenLabs returned %s %s", r.status_code, r.text[:200])
-        except Exception:
-            logger.exception("ElevenLabs TTS failed")
-    # HF / local fallback - try any TTS model via HF
-    model_id = get_best_model_id("speech:tts") or get_best_model_id("speech:stt")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, req.text)
-            return JSONResponse({"source":"hf","result":resp})
-        except Exception:
-            logger.exception("HF tts failed")
-    raise HTTPException(status_code=503, detail="TTS unavailable")
-
-@app.post("/voice_clone")
-async def voice_clone(seed_audio: UploadFile = File(...), text: str = Form(...), user_id: str = Form("guest")):
-    # Placeholder: ElevenLabs voice cloning flow or 3rd party voice cloning would go here.
-    if ELEVEN_API_KEY:
-        # NOTE: voice cloning via Eleven Labs requires a specific workflow & account access.
-        return JSONResponse({"note": "Voice cloning with ElevenLabs - implement API call here (requires voice cloning enabled)."})
-    return JSONResponse({"error": "Voice cloning requires ElevenLabs or another provider key."}, status_code=503)
-
-# --------------------------- Music generation & editing ---------------------------
-@app.post("/music/generate")
-async def music_generate(prompt: str = Form(...), duration: int = Form(20), user_id: str = Form("guest")):
-    model_id = get_best_model_id("audio:music")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, {"prompt": prompt, "duration": duration})
-            return {"source":"hf","result":resp}
-        except Exception:
-            logger.exception("HF musicgen failed")
-    raise HTTPException(status_code=503, detail="Music generation unavailable")
-
-@app.post("/music/edit")
-async def music_edit(track: UploadFile = File(...), style: str = Form(...), user_id: str = Form("guest")):
-    tmp = write_temp_file(await track.read(), ".mp3")
-    model_id = get_best_model_id("audio:music")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, {"track": open(tmp,"rb").read(), "style": style})
-            return {"source":"hf","result":resp}
-        except Exception:
-            logger.exception("HF music edit failed")
-    raise HTTPException(status_code=503, detail="Music editing unavailable")
-
-# --------------------------- Video: text2video / video summary / img2vid placeholders ---------------------------
-@app.post("/video/text2video")
-async def text2video(prompt: str = Form(...), seconds: int = Form(4), user_id: str = Form("guest")):
-    model_id = get_best_model_id("video:text2video")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, {"prompt": prompt, "seconds": seconds})
-            return {"source":"hf","result":resp}
-        except Exception:
-            logger.exception("HF text2video failed")
-    return JSONResponse({"error": "Text2Video requires heavy models; configure HF_TOKEN or local pipeline."}, status_code=503)
-
-@app.post("/fusion/video_summary")
-async def fusion_video_summary(video: UploadFile = File(...), user_id: str = Form("guest")):
-    # Save and queue heavy processing in production. Here: placeholder pipeline.
-    vbytes = await video.read()
-    vpath = write_temp_file(vbytes, os.path.splitext(video.filename)[1] if video.filename else ".mp4")
-    # Placeholder: use ffmpeg to extract audio, then whisper to transcribe, then summarise.
-    transcript = "(video transcription placeholder — implement ffmpeg + whisper or HF speech-to-text)"
-    model_id = get_best_model_id("text:summarization")
-    if HF_TOKEN and model_id:
-        try:
-            summary = hf_inference_request(model_id, transcript, params={"max_new_tokens": 200})
-            return {"transcript": transcript, "summary": summary}
-        except Exception:
-            logger.exception("Video summary failed")
-            return {"transcript": transcript, "summary": "(summary failed)"}
-    return {"transcript": transcript, "summary": "(no summarizer configured)"}
-
-# --------------------------- 3D: pointcloud / mesh placeholders ---------------------------
-@app.post("/3d/generate")
-async def generate_pointcloud(prompt: str = Form(...), user_id: str = Form("guest")):
-    model_id = get_best_model_id("3d:pointcloud")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, {"prompt": prompt})
-            return {"source":"hf","result":resp}
-        except Exception:
-            logger.exception("3D generation failed")
-    return JSONResponse({"error":"3D generation requires Point-E or similar model"}, status_code=503)
-
-# --------------------------- Embeddings & RAG helpers ---------------------------
-@app.post("/text/embed")
-def embed_text(texts: List[str] = Form(...), user_id: str = Form("guest")):
-    try:
-        from sentence_transformers import SentenceTransformer
-        model = MODEL_CACHE.get("embed")
-        if not model:
-            model_name = get_best_model_id("text:embed") or "sentence-transformers/all-mpnet-base-v2"
-            model = SentenceTransformer(model_name)
-            MODEL_CACHE["embed"] = model
-        vecs = model.encode(texts).tolist()
-        return {"source":"local","embeddings":vecs}
-    except Exception:
-        pass
-    if HF_TOKEN and USE_HF_INFERENCE:
-        model_id = get_best_model_id("text:embed") or "sentence-transformers/all-mpnet-base-v2"
-        try:
-            resp = hf_inference_request(model_id, {"inputs": texts})
-            return {"source":"hf","embeddings":resp}
-        except Exception:
-            logger.exception("HF embed failed")
-    raise HTTPException(status_code=503, detail="Embedding model unavailable")
-
-# --------------------------- Text analysis: summarise / translate / sentiment / finance / medical ---------------------------
-@app.post("/text/summarize")
-def text_summarize(text: str = Form(...), user_id: str = Form("guest")):
-    model_id = get_best_model_id("text:summarization")
-    if HF_TOKEN and model_id:
-        try:
-            resp = hf_inference_request(model_id, text)
-            return {"source":"hf","summary":resp}
-        except Exception:
-            logger.exception("Summarization failed")
-    raise HTTPException(status_code=503, detail="Summarization unavailable")
-
-@app.post("/text/translate")
-def translate(text: str = Form(...), user_id: str = Form("guest")):
-    model_id = get_best_model_id("text:translation")
-    if HF_TOKEN and model_id:
-        try:
-            resp = hf_inference_request(model_id, text)
-            return {"source":"hf","translation":resp}
-        except Exception:
-            logger.exception("Translation failed")
-    raise HTTPException(status_code=503, detail="Translation unavailable")
-
-@app.post("/analyze/sentiment")
-def sentiment_analysis(text: str = Form(...), user_id: str = Form("guest")):
-    model_id = get_best_model_id("text:sentiment")
-    if HF_TOKEN and model_id:
-        try:
-            resp = hf_inference_request(model_id, text)
-            return {"source":"hf","result":resp}
-        except Exception:
-            logger.exception("Sentiment analysis failed")
-    raise HTTPException(status_code=503, detail="Sentiment model unavailable")
-
-@app.post("/analyze/finance")
-def finance_analysis(text: str = Form(...), user_id: str = Form("guest")):
-    model_id = get_best_model_id("text:finance")
-    if HF_TOKEN and model_id:
-        try:
-            resp = hf_inference_request(model_id, text)
-            return {"source":"hf","analysis":resp}
-        except Exception:
-            logger.exception("Finance analysis failed")
-    raise HTTPException(status_code=503, detail="Finance analysis model unavailable")
-
-@app.post("/analyze/medical")
-def medical_analysis(text: str = Form(...), user_id: str = Form("guest")):
-    model_id = get_best_model_id("text:medical")
-    if HF_TOKEN and model_id:
-        try:
-            resp = hf_inference_request(model_id, text)
-            return {"source":"hf","analysis":resp}
-        except Exception:
-            logger.exception("Medical analysis failed")
-    raise HTTPException(status_code=503, detail="Medical analysis model unavailable")
-
-# --------------------------- ML endpoints: anomaly / game ai / recommend ---------------------------
-@app.post("/analyze/anomaly")
-async def anomaly_detection(data: List[float] = Form(...), user_id: str = Form("guest")):
-    model_id = get_best_model_id("ml:anomaly")
-    if HF_TOKEN and model_id:
-        try:
-            resp = await hf_inference_async(model_id, {"input": data})
-            return {"source":"hf","result":resp}
-        except Exception:
-            logger.exception("Anomaly detection failed")
-    return {"note":"Local anomaly detection not implemented"}
-
-@app.post("/ml/game_ai")
-async def game_ai_simulation(context: str = Form(...), user_id: str = Form("guest")):
-    model_id = get_best_model_id("ml:game_ai")
-    if HF_TOKEN and model_id:
-        try:
-            resp = hf_inference_request(model_id, context)
-            return {"source":"hf","result":resp}
-        except Exception:
-            logger.exception("Game AI failed")
-    raise HTTPException(status_code=503, detail="Game AI unavailable")
-
-# --------------------------- Adaptive memory endpoints ---------------------------
-@app.post("/memory/store")
-async def api_memory_store(user_id: str = Form(...), key: str = Form(...), value: str = Form(...)):
-    try:
-        ok = await memory_store(user_id, key, {"value": value, "ts": now_ts()})
-        return {"ok": ok}
-    except Exception:
-        logger.exception("memory store failed")
-        raise HTTPException(500, detail="memory store failed")
-
-@app.get("/memory/fetch")
-async def api_memory_fetch(user_id: str = Query(...), key_prefix: str = Query("")):
-    try:
-        mems = await memory_fetch(user_id, key_prefix)
-        return {"memory": mems}
-    except Exception:
-        logger.exception("memory fetch failed")
-        raise HTTPException(500, detail="memory fetch failed")
-
-# --------------------------- WebSocket STT (streaming audio) ---------------------------
-@app.websocket("/ws/stt")
-async def ws_stt(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        init = await websocket.receive_json()
-        user_id = init.get("user_id", "guest")
-        await websocket.send_json({"status":"ready"})
-        collected = bytearray()
-        while True:
-            msg = await websocket.receive_json()
-            if msg.get("done"):
-                break
-            b64 = msg.get("chunk")
-            if not b64:
-                continue
-            import base64
-            collected.extend(base64.b64decode(b64))
-            # optional partial transcription placeholder
-            if len(collected) > 16000*10:
-                await websocket.send_json({"partial":"(partial transcript placeholder)"})
-        tmp = write_temp_file(bytes(collected), ".wav")
-        whisper = lazy_load_whisper_local()
-        if whisper:
-            try:
-                segments, info = whisper.transcribe(tmp)
-                text = " ".join([s.text for s in segments])
-                await websocket.send_json({"result": text})
-                await websocket.close()
-                return
-            except Exception:
-                logger.exception("Local whisper transcribe failed")
-        # HF fallback
-        await websocket.send_json({"result":"(transcription placeholder - enable whisper or HF stt)"})
-        await websocket.close()
-    except WebSocketDisconnect:
-        logger.info("stt websocket disconnected")
-    except Exception:
-        logger.exception("ws_stt error")
-        try:
-            await websocket.close()
-        except:
-            pass
-
-# --------------------------- Misc helpers ---------------------------
-@app.get("/models/registry")
-def models_registry():
-    return {"registry": MODEL_REGISTRY}
-
-@app.get("/models/find")
-def models_find(category: str = Query(...)):
-    return {"category": category, "candidates": MODEL_REGISTRY.get(category, [])}
-
-@app.post("/admin/cleanup_temp")
-def admin_cleanup_temp(older_than_seconds: int = Form(3600)):
-    cleanup_temp_files(older_than_seconds)
-    return {"ok": True}
-
-# --------------------------- Startup tasks ---------------------------
+# ---------------- Startup tasks ----------------
 @app.on_event("startup")
 def on_startup():
-    logger.info("Starting Zynara Super-Ultimate")
-    logger.info("HF_TOKEN set: %s", bool(HF_TOKEN))
-    logger.info("OpenAI key set: %s", bool(OPENAI_API_KEY))
-    logger.info("ElevenLabs key set: %s", bool(ELEVEN_API_KEY))
-    logger.info("Torch available: %s", bool(torch))
-    # Warm small tokenizer to reduce first-request latency
-    if AutoTokenizer:
-        try:
+    logger.info("Zynara Ultra v5 starting up")
+    # warm small tokenizer if available
+    try:
+        if AutoTokenizer:
             AutoTokenizer.from_pretrained("google/flan-t5-small")
-            logger.info("Warmed small tokenizer")
-        except Exception:
-            pass
+            logger.info("warmed small tokenizer")
+    except Exception:
+        logger.debug("warming tokenizer failed", exc_info=True)
+    # try Milvus init
+    try:
+        init_milvus()
+    except Exception:
+        logger.debug("milvus init error", exc_info=True)
+    # optionally warm local SDXL
+    try:
+        if USE_LOCAL_SDXL:
+            lazy_load_sdxl_local()
+    except Exception:
+        logger.debug("sdxl warm failed", exc_info=True)
+    # optionally warm whisper
+    try:
+        if USE_LOCAL_WHISPER:
+            lazy_load_whisper_local()
+    except Exception:
+        logger.debug("whisper warm failed", exc_info=True)
 
-# --------------------------- Run if main ---------------------------
+# ---------------- Run server ----------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_level="info")
