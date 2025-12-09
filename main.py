@@ -385,14 +385,16 @@ os.makedirs(IMAGES_DIR, exist_ok=True)
 @app.post("/vision/pose")
 async def vision_pose(file: UploadFile = File(...)):
     """
-    Pose estimation using Detectron2 if installed, else returns bounding-box keypoints via HF if available.
+    Pose estimation using Detectron2 if installed,
+    else returns bounding-box keypoints via HF if available.
     """
     ok, reason = moderate_text(file.filename or "")
     if not ok:
         raise HTTPException(status_code=400, detail=reason or "Blocked")
-    # read image bytes
+
     content = await file.read()
-    # Try detectron2 local
+
+    # Try local Detectron2
     try:
         import numpy as np
         from detectron2.engine import DefaultPredictor
@@ -402,29 +404,45 @@ async def vision_pose(file: UploadFile = File(...)):
 
         if "vision:pose" not in MODEL_CACHE:
             cfg = get_cfg()
-            cfg.merge_from_file(model_zoo.get_config_file("COCO-Keypoints/keypoint_rcnn_R_50_FPN_3x.yaml"))
+            cfg.merge_from_file(
+                model_zoo.get_config_file("COCO-Keypoints/keypoint_rcnn_R_50_FPN_3x.yaml")
+            )
             cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5
-            cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-Keypoints/keypoint_rcnn_R_50_FPN_3x.yaml")
+            cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(
+                "COCO-Keypoints/keypoint_rcnn_R_50_FPN_3x.yaml"
+            )
             MODEL_CACHE["vision:pose"] = DefaultPredictor(cfg)
+
         predictor = MODEL_CACHE["vision:pose"]
         img = Image.open(io.BytesIO(content)).convert("RGB")
         arr = np.array(img)
         outputs = predictor(arr)
         v = Visualizer(arr[:, :, ::-1])
         v = v.draw_instance_predictions(outputs["instances"].to("cpu"))
+
         buffer = io.BytesIO()
         Image.fromarray(v.get_image()[:, :, ::-1]).save(buffer, format="PNG")
         buffer.seek(0)
         return StreamingResponse(buffer, media_type="image/png")
+
     except Exception:
-        # fallback: HF inference (if configured)
+        # Fallback: Hugging Face inference if HF_TOKEN and model_id exist
         model_id = get_best_hf_id("vision:pose")
         if HF_TOKEN and model_id and httpx:
             try:
+                # async HF inference helper
+                async def hf_inference_async(model_id, image_bytes):
+                    url = f"https://api-inference.huggingface.co/models/{model_id}"
+                    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.post(url, content=image_bytes, headers=headers)
+                        resp.raise_for_status()
+                        return resp.json()
                 resp = await hf_inference_async(model_id, content)
                 return {"source": "hf", "result": resp}
             except Exception as e:
                 return {"error": "Pose model not available locally or via HF", "detail": str(e)}
+
         return {"error": "Detectron2 not installed and HF fallback unavailable"}
 
 @app.post("/vision/ocr")
@@ -713,40 +731,72 @@ def load_video_pipeline(model_id: str):
         return None
 
 @app.post("/video/generate")
-async def video_generate(prompt: str = Form(...), seconds: int = Form(4)):
+async def video_generate(
+    prompt: str = Form(...),
+    seconds: int = Form(4),
+    fps: int = Form(8),
+    num_inference_steps: int = Form(30),
+):
+    """
+    Generate a short video from text using multiple backends:
+    1. StableVideoDiffusionPipeline (local)
+    2. Hugging Face Inference API
+    3. DALL·E 3 (OpenAI)
+    """
+    # ---- moderation ----
     ok, reason = moderate_text(prompt)
     if not ok:
         raise HTTPException(status_code=400, detail=reason or "Blocked")
-    model_id = get_best_hf_id("video:img2vid") or get_best_hf_id("video:txt2vid")
-    if not model_id:
-        return {"error": "No video model configured"}
-    # try diffusers pipeline
-    if StableVideoDiffusionPipeline:
-        pipe = load_video_pipeline(model_id)
-        if not pipe:
-            return {"error": "Video pipeline load failed"}
-        try:
-            frames = max(8, int(seconds * 8))
-            result = pipe(prompt, num_inference_steps=30, num_frames=frames)
-            video_frames = getattr(result, "frames", None) or result[0]
-            out_vid = f"/tmp/video_{uuid.uuid4().hex}.mp4"
-            try:
-                import imageio
-                imageio.mimwrite(out_vid, video_frames, fps=8)
-                return FileResponse(out_vid, media_type="video/mp4")
-            except Exception:
-                return {"frames_count": len(video_frames)}
-        except Exception as e:
-            return {"error": str(e)}
-    # HF inference fallback
-    if HF_TOKEN and httpx:
-        try:
-            resp = await hf_inference_async(model_id, {"prompt": prompt, "seconds": seconds})
-            return {"source": "hf", "result": resp}
-        except Exception as e:
-            return {"error": str(e)}
-    return {"error": "Video generation unavailable"}
 
+    # ---- local Stable Video Diffusion ----
+    model_id = get_best_hf_id("video:img2vid") or get_best_hf_id("video:txt2vid")
+    if StableVideoDiffusionPipeline and model_id:
+        pipe = load_video_pipeline(model_id)
+        if pipe:
+            try:
+                frames_count = max(8, int(seconds * fps))
+                result = pipe(prompt, num_inference_steps=num_inference_steps, num_frames=frames_count)
+                video_frames = getattr(result, "frames", None) or result[0]
+
+                import imageio
+                import numpy as np
+                video_frames = [np.array(f).astype(np.uint8) for f in video_frames]
+
+                out_vid = f"/tmp/video_{uuid.uuid4().hex}.mp4"
+                imageio.mimwrite(out_vid, video_frames, fps=fps)
+                return FileResponse(out_vid, media_type="video/mp4")
+            except Exception as e:
+                print("Local video generation failed:", e)
+
+    # ---- HF Inference API fallback ----
+    if HF_TOKEN and httpx and model_id:
+        try:
+            resp = await hf_inference_async(model_id, {"prompt": prompt, "seconds": seconds, "fps": fps})
+            return {"source": "hf_inference", "result": resp}
+        except Exception as e:
+            print("HF Inference video failed:", e)
+
+    # ---- DALL·E 3 fallback via OpenAI ----
+    if OPENAI_MOD:
+        try:
+            # OpenAI API currently supports image generation; we simulate video by generating frames
+            frames_count = max(4, int(seconds * fps))
+            frame_urls = []
+            for i in range(frames_count):
+                response = OPENAI_MOD.images.generate(
+                    model="dall-e-3",
+                    prompt=prompt,
+                    size="1024x1024"
+                )
+                url = response.data[0].url
+                frame_urls.append(url)
+            return {"source": "dall-e-3", "frames": frame_urls, "fps": fps}
+        except Exception as e:
+            print("DALL·E 3 fallback failed:", e)
+
+    # ---- nothing available ----
+    return {"error": "Video generation unavailable — no backend succeeded"}
+    
 @app.post("/video/img2vid")
 async def video_img2vid(seed_image: UploadFile = File(...), prompt: str = Form(...), frames: int = Form(16)):
     content = await seed_image.read()
@@ -782,49 +832,100 @@ async def video_img2vid(seed_image: UploadFile = File(...), prompt: str = Form(.
 # ===============================
 @app.post("/3d/generate")
 async def generate_3d(prompt: str = Form(...)):
+    # Moderate input
     ok, reason = moderate_text(prompt)
     if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Blocked")
-    hf_id = get_best_hf_id("3d:object")
-    # Try Point-E local (if installed)
-    try:
-        # Local import may be heavy; attempt if available
-        from point_e.diffusion.configs import DIFFUSION_CONFIGS, model_from_config
-        from point_e.util.point_cloud import save_point_cloud
-        from point_e.diffusion.sampling import sample_model
+        raise HTTPException(status_code=400, detail=reason or "Blocked by moderation")
 
-        key = f"3d:{hf_id}"
-        if key not in MODEL_CACHE:
+    hf_id = get_best_hf_id("3d:object")
+    if not hf_id:
+        return {"error": "No 3D model configured"}
+
+    # Attempt local Point-E generation
+    try:
+        from point_e.diffusion.configs import DIFFUSION_CONFIGS, model_from_config
+        from point_e.diffusion.sampling import sample_model
+        from point_e.util.point_cloud import save_point_cloud
+
+        cache_key = f"3d:{hf_id}"
+        if cache_key not in MODEL_CACHE:
+            device = 'cuda' if torch and torch.cuda.is_available() else 'cpu'
             cfg = DIFFUSION_CONFIGS['base']
-            model = model_from_config(cfg, device='cuda' if torch and torch.cuda.is_available() else 'cpu')
-            MODEL_CACHE[key] = model
-        model = MODEL_CACHE[key]
+            model = model_from_config(cfg, device=device)
+            MODEL_CACHE[cache_key] = model
+        model = MODEL_CACHE[cache_key]
+
+        # Sample point cloud
         pc = sample_model(model, prompt)
         out_path = f"/tmp/pointcloud_{uuid.uuid4().hex}.ply"
         save_point_cloud(pc, out_path)
         return FileResponse(out_path)
-    except Exception:
-        # HF fallback
-        if HF_TOKEN and hf_id and httpx:
-            try:
-                resp = await hf_inference_async(hf_id, prompt)
-                return {"source": "hf", "result": resp}
-            except Exception as e:
-                return {"error": str(e)}
+    
+    except ImportError:
+        # Point-E not installed
+        pass
+    except Exception as e:
+        return {"error": f"Local Point-E failed: {e}"}
+
+    # Hugging Face Inference API fallback
+    if HF_TOKEN and hf_id and httpx:
+        try:
+            async def hf_inference_async(model_id: str, prompt: str):
+                headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+                async with httpx.AsyncClient(timeout=120) as client:
+                    r = await client.post(
+                        f"https://api-inference.huggingface.co/models/{model_id}",
+                        headers=headers,
+                        json={"inputs": prompt}
+                    )
+                    r.raise_for_status()
+                    return r.json()
+            result = await hf_inference_async(hf_id, prompt)
+            return {"source": "hf_inference", "result": result}
+
+        except Exception as e:
+            return {"error": f"HF Inference failed: {e}"}
+
     return {"error": "3D generation unavailable"}
 
 # ===============================
 # Reinforcement Learning / Decision endpoints
 # ===============================
+import json
+import numpy as np
+
 @app.post("/rl/predict")
 async def rl_predict(obs: str = Form(...), model: str = Form("rl:policy")):
     """
-    Very small placeholder: accepts a JSON/CSV observation string and returns a dummy action.
-    For production, wire stable-baselines3 or a serving endpoint.
+    Parses a JSON or CSV observation string and returns a dummy action.
+    Can be replaced with stable-baselines3 / RL model inference.
     """
     hf_id = get_best_hf_id(model)
-    return {"action": "noop", "model": hf_id, "obs_snippet": obs[:200]}
+    
+    # Attempt to parse JSON first
+    try:
+        obs_data = json.loads(obs)
+        if isinstance(obs_data, dict):
+            obs_array = np.array(list(obs_data.values()), dtype=np.float32)
+        elif isinstance(obs_data, list):
+            obs_array = np.array(obs_data, dtype=np.float32)
+        else:
+            obs_array = np.array([float(obs_data)], dtype=np.float32)
+    except Exception:
+        # Fallback: try CSV-style parsing
+        try:
+            obs_array = np.array([float(x.strip()) for x in obs.split(",")], dtype=np.float32)
+        except Exception:
+            obs_array = np.array([0.0], dtype=np.float32)
 
+    # Dummy action: just a random float array with same shape
+    action = np.random.randn(*obs_array.shape).tolist()
+
+    return {
+        "action": action,
+        "model": hf_id,
+        "obs_snippet": str(obs_array.tolist())[:200]
+    }
 # ===============================
 # ML Utilities
 # ===============================
@@ -832,30 +933,46 @@ async def rl_predict(obs: str = Form(...), model: str = Form("rl:policy")):
 async def ml_anomaly(file: UploadFile = File(...)):
     content = await file.read()
     hf_id = get_best_hf_id("ml:anomaly")
-    # Try CLIP local
+
+    # Try local CLIP
     try:
         from transformers import CLIPProcessor, CLIPModel
+
         key = f"clip:{hf_id}"
         if key not in MODEL_CACHE:
             processor = CLIPProcessor.from_pretrained(hf_id)
             model = CLIPModel.from_pretrained(hf_id)
             MODEL_CACHE[key] = (processor, model)
         processor, model = MODEL_CACHE[key]
+
         img = Image.open(io.BytesIO(content)).convert("RGB")
         inputs = processor(images=img, return_tensors="pt")
-        emb = model.get_image_features(**inputs)
-        score = float(torch.norm(emb).item()) if torch else None
-        return {"anomaly_score": score}
-    except Exception:
+        if torch:
+            emb = model.get_image_features(**inputs)
+            score = float(torch.norm(emb).item())
+        else:
+            score = None
+        return {"source": "local", "anomaly_score": score}
+
+    except Exception as e_local:
         # HF fallback
         if HF_TOKEN and hf_id and httpx:
             try:
+                async def hf_inference_async(model_id: str, file_bytes: bytes):
+                    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+                    async with httpx.AsyncClient() as client:
+                        files = {"file": file_bytes}
+                        resp = await client.post(f"https://api-inference.huggingface.co/models/{model_id}", headers=headers, files=files)
+                        resp.raise_for_status()
+                        return resp.json()
+
                 resp = await hf_inference_async(hf_id, content)
                 return {"source": "hf", "result": resp}
-            except Exception as e:
-                return {"error": str(e)}
-    return {"error": "Anomaly detection unavailable"}
+            except Exception as e_hf:
+                return {"error": f"HF fallback failed: {str(e_hf)}"}
 
+    return {"error": "Anomaly detection unavailable"}
+    
 @app.post("/ml/recommend")
 async def ml_recommend(user_id: str = Form(...), context: Optional[str] = Form(None)):
     # placeholder: return empty recommendations
@@ -879,31 +996,60 @@ async def medical_scan(file: UploadFile = File(...), model: str = Form("medical:
     return {"error": "Medical imaging model unavailable"}
 
 @app.post("/medical/protein")
-async def medical_protein(sequence: str = Form(...), model: str = Form("medical:protein")):
+async def medical_protein(
+    sequence: str = Form(...),
+    model: str = Form("medical:protein")
+):
     hf_id = get_best_hf_id(model)
-    # ESM2 usage (embedding) if installed via transformers
+    if not hf_id:
+        return {"error": "Protein model not found"}
+
+    # Try ESM2 via transformers
     try:
+        import torch
         from transformers import AutoTokenizer, AutoModel
+
         key = f"esm:{hf_id}"
         if key not in MODEL_CACHE:
             tokenizer = AutoTokenizer.from_pretrained(hf_id)
             model_obj = AutoModel.from_pretrained(hf_id)
+            model_obj.eval()  # ensure evaluation mode
             MODEL_CACHE[key] = (tokenizer, model_obj)
+
         tokenizer, model_obj = MODEL_CACHE[key]
         inputs = tokenizer(sequence, return_tensors="pt")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        model_obj.to(device)
+
         with torch.no_grad():
-            emb = model_obj(**inputs).last_hidden_state.mean(dim=1)
-        return {"embedding_norm": float(torch.norm(emb).item())}
-    except Exception:
-        # HF fallback
+            outputs = model_obj(**inputs)
+            # mean pooling over sequence length
+            emb = outputs.last_hidden_state.mean(dim=1)
+        return {
+            "source": "local",
+            "embedding_norm": float(torch.norm(emb).item())
+        }
+
+    except Exception as e_local:
+        # fallback: HF Inference API if token available
         if HF_TOKEN and hf_id and httpx:
             try:
-                resp = await hf_inference_async(hf_id, sequence)
-                return {"source": "hf", "result": resp}
-            except Exception as e:
-                return {"error": str(e)}
-    return {"error": "Protein model unavailable"}
+                headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        f"https://api-inference.huggingface.co/models/{hf_id}",
+                        headers=headers,
+                        json={"inputs": sequence}
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return {"source": "hf_inference", "result": data}
+            except Exception as e_hf:
+                return {"error": f"HF fallback failed: {str(e_hf)}"}
 
+        return {"error": f"Protein model unavailable locally: {str(e_local)}"}
+        
 # ===============================
 # Ask endpoint (natural language routing)
 # ===============================
