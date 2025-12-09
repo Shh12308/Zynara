@@ -947,25 +947,24 @@ async def ml_anomaly(file: UploadFile = File(...)):
 
         img = Image.open(io.BytesIO(content)).convert("RGB")
         inputs = processor(images=img, return_tensors="pt")
+
         if torch:
-            emb = model.get_image_features(**inputs)
-            score = float(torch.norm(emb).item())
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model.to(device)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+
+            with torch.no_grad():
+                emb = model.get_image_features(**inputs)
+            score = float(torch.norm(emb).cpu().item())
         else:
             score = None
+
         return {"source": "local", "anomaly_score": score}
 
     except Exception as e_local:
         # HF fallback
         if HF_TOKEN and hf_id and httpx:
             try:
-                async def hf_inference_async(model_id: str, file_bytes: bytes):
-                    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-                    async with httpx.AsyncClient() as client:
-                        files = {"file": file_bytes}
-                        resp = await client.post(f"https://api-inference.huggingface.co/models/{model_id}", headers=headers, files=files)
-                        resp.raise_for_status()
-                        return resp.json()
-
                 resp = await hf_inference_async(hf_id, content)
                 return {"source": "hf", "result": resp}
             except Exception as e_hf:
@@ -1055,43 +1054,51 @@ async def medical_protein(
 # ===============================
 @app.post("/ask")
 async def ask(text: str = Form(...), user_id: Optional[str] = Form("guest")):
-    ok, reason = moderate_text(text)
-    if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Blocked by moderation")
-    lower = text.lower()
-    image_keywords = ["image", "picture", "draw", "painting", "generate image", "create image", "make me an image", "dall", "dalle", "dall-e", "dall e"]
-    video_keywords = ["video", "create video", "generate video", "text2video", "make a video"]
-    audio_keywords = ["audio", "song", "music", "synthesize voice", "tts", "text to speech"]
-    code_keywords = ["code", "function", "script", "implement", "write code", "program"]
-    three_d_keywords = ["3d", "mesh", "point cloud", "render 3d", "nerf"]
-    text_keywords = ["explain", "summarize", "translate", "what is", "who is", "how to", "define", "describe"]
+    text = text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Input text cannot be empty")
 
     try:
-        if any(k in lower for k in image_keywords):
-            # call image endpoint
-            res = await image_generate(prompt=text, samples=1)
-            return {"type": "image", "result": res}
-        if any(k in lower for k in video_keywords):
-            res = await video_generate(prompt=text, seconds=4)
-            return {"type": "video", "result": res}
-        if any(k in lower for k in audio_keywords):
-            res = await speech_tts(text=text)
-            return {"type": "audio", "result": res}
-        if any(k in lower for k in code_keywords):
-            res = await code_generate(prompt=text)
-            return {"type": "code", "result": res}
-        if any(k in lower for k in three_d_keywords):
-            res = await generate_3d(prompt=text)
-            return {"type": "3d", "result": res}
+        ok, reason = moderate_text(text)
+        if not ok:
+            raise HTTPException(status_code=400, detail=reason or "Blocked by moderation")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Moderation failed: {str(e)}")
+
+    lower = text.lower()
+
+    # Map of category → (keywords, handler)
+    ROUTES = [
+        ("image", ["image", "picture", "draw", "painting", "generate image", "create image", "make me an image", "dall", "dalle", "dall-e", "dall e"], image_generate),
+        ("video", ["video", "create video", "generate video", "text2video", "make a video"], video_generate),
+        ("audio", ["audio", "song", "music", "synthesize voice", "tts", "text to speech"], speech_tts),
+        ("code", ["code", "function", "script", "implement", "write code", "program"], code_generate),
+        ("3d", ["3d", "mesh", "point cloud", "render 3d", "nerf"], generate_3d),
+    ]
+
+    try:
+        for cat, keywords, handler in ROUTES:
+            if any(k in lower for k in keywords):
+                if cat == "video":
+                    res = await handler(prompt=text, seconds=4)
+                elif cat == "image":
+                    res = await handler(prompt=text, samples=1)
+                else:
+                    res = await handler(text if handler == speech_tts else text)
+                return {"type": cat, "result": res}
+
         # default text generation
         res = await text_generate(prompt=text, category="text:chat", max_tokens=256)
         return {"type": "text", "result": res}
+
     except Exception as e:
         return {"error": str(e)}
-
+        
 # ===============================
 # WebSocket streaming chat (improved with chunked streaming)
 # ===============================
+import asyncio  # ensure imported
+
 @app.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket):
     await ws.accept()
@@ -1106,12 +1113,11 @@ async def ws_chat(ws: WebSocket):
                 continue
             model_data = load_text_model(category)
             if not model_data:
-                # fall back to HF inference via API (non-streaming)
                 if HF_TOKEN and httpx:
                     model_id = get_best_hf_id(category)
                     try:
-                        resp = hf_inference_request(model_id, prompt)
-                        out_text = resp.get("generated_text") or (resp[0].get("generated_text") if isinstance(resp, list) and resp else str(resp))
+                        resp = await hf_inference_async(model_id, prompt)
+                        out_text = resp.get("generated_text") or str(resp)
                         await ws.send_json({"text": out_text})
                         continue
                     except Exception as e:
@@ -1120,7 +1126,6 @@ async def ws_chat(ws: WebSocket):
                 await ws.send_json({"error": f"Model {category} unavailable"})
                 continue
             tokenizer, model = model_data
-            # naive non-streaming generation chunked to websocket
             try:
                 inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
                 outputs = model.generate(**inputs, max_new_tokens=256)
@@ -1137,7 +1142,6 @@ async def ws_chat(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
-
 # ===============================
 # Admin / Utilities / Search / Weather / Wolfram
 # ===============================
