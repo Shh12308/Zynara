@@ -50,11 +50,19 @@ try:
 except Exception:
     Image = None
 
+# ===============================
 # Multimodal libs
+# ===============================
 try:
     from diffusers import StableDiffusionPipeline, StableVideoDiffusionPipeline
 except Exception:
     StableDiffusionPipeline = StableVideoDiffusionPipeline = None
+
+try:
+    # LTX‑2 video generation (if installed)
+    from ltx2 import LTX2Pipeline
+except Exception:
+    LTX2Pipeline = None
 
 try:
     from faster_whisper import WhisperModel
@@ -210,7 +218,7 @@ MODEL_REGISTRY = {
     "vision:vqa": ["Salesforce/blip-vqa-large"],
     "vision:caption": ["Salesforce/blip2-flan-t5-xl"],
     "image:txt2img": ["stabilityai/stable-diffusion-xl-base-1.0"],
-    "video:txt2vid": ["THUDM/CogVideoX-5b"],
+"video:txt2vid": ["lightricks/ltx2-text2video"],
 
     # Video
     "video:classify": ["facebook/timesformer-base-finetuned-k400"],
@@ -263,6 +271,23 @@ def load_pipeline_task(task_name: str, hf_id: str):
         MODEL_CACHE[task_name] = p
         return p
     except Exception:
+        return None
+
+def load_video_pipeline(model_id: str):
+    if VIDEO_CACHE_KEY in MODEL_CACHE:
+        return MODEL_CACHE[VIDEO_CACHE_KEY]
+    try:
+        if "ltx2" in model_id.lower():
+            from ltx2 import LTX2Pipeline  # adjust to actual class
+            pipe = LTX2Pipeline.from_pretrained(model_id, device="cuda" if torch and torch.cuda.is_available() else "cpu")
+        elif StableVideoDiffusionPipeline:
+            pipe = StableVideoDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16 if torch and torch.cuda.is_available() else torch.float32)
+            if torch and torch.cuda.is_available():
+                pipe = pipe.to("cuda")
+        MODEL_CACHE[VIDEO_CACHE_KEY] = pipe
+        return pipe
+    except Exception as e:
+        print("Video pipeline load failed:", e)
         return None
 
 # ===============================
