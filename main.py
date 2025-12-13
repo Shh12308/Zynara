@@ -70,9 +70,9 @@ except Exception:
 # App config
 # ===============================
 APP_NAME = os.getenv("APP_NAME", "Zynara Mega AI")
-CREATOR = os.getenv("APP_AUTHOR", "GoldBoy")
+CREATOR = os.getenv("APP_AUTHOR", "GoldYLocks")
 PORT = int(os.getenv("PORT", 7860))
-APP_DESCRIPTION = os.getenv("APP_DESCRIPTION", "Multi-modal AI backend 50+ HF models")
+APP_DESCRIPTION = os.getenv("APP_DESCRIPTION", "Multi-modal AI backend built and designed using hf models")
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -1053,47 +1053,74 @@ async def medical_protein(
 # Ask endpoint (natural language routing)
 # ===============================
 @app.post("/ask")
-async def ask(text: str = Form(...), user_id: Optional[str] = Form("guest")):
-    text = text.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="Input text cannot be empty")
+async def ask(
+    text: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    user_id: Optional[str] = Form("guest")
+):
+    # ---- 1. Moderate input ----
+    content_to_check = text or (file.filename if file else "")
+    ok, reason = moderate_text(content_to_check)
+    if not ok:
+        raise HTTPException(status_code=400, detail=reason or "Blocked")
 
+    # ---- 2. Detect type ----
+    category = None
+    if file:
+        ext = file.filename.split(".")[-1].lower()
+        if ext in ["png", "jpg", "jpeg", "bmp"]:
+            category = "image"
+        elif ext in ["mp3", "wav", "ogg"]:
+            category = "audio"
+        elif ext in ["mp4", "mov", "avi"]:
+            category = "video"
+        else:
+            category = "file"
+    elif text:
+        # Keyword-based fallback; replace with embedding classifier if desired
+        lower = text.lower()
+        if any(k in lower for k in ["code", "function", "script", "program"]):
+            category = "code"
+        elif any(k in lower for k in ["image", "draw", "generate", "painting", "picture"]):
+            category = "image"
+        elif any(k in lower for k in ["video", "movie", "clip"]):
+            category = "video"
+        elif any(k in lower for k in ["music", "song", "audio", "tts"]):
+            category = "audio"
+        elif any(k in lower for k in ["3d", "mesh", "point cloud", "nerf"]):
+            category = "3d"
+        else:
+            category = "text"
+    else:
+        raise HTTPException(status_code=400, detail="No input provided")
+
+    # ---- 3. Call the appropriate handler ----
     try:
-        ok, reason = moderate_text(text)
-        if not ok:
-            raise HTTPException(status_code=400, detail=reason or "Blocked by moderation")
+        if category == "text":
+            res = await text_generate(prompt=text, category="text:chat", max_tokens=256)
+        elif category == "code":
+            res = await code_generate(prompt=text, category="code:gen", max_tokens=256)
+        elif category == "image":
+            if file:
+                res = await vision_caption(file=file)
+            else:
+                res = await image_generate(prompt=text, samples=1)
+        elif category == "video":
+            res = await video_generate(prompt=text, seconds=4)
+        elif category == "audio":
+            if file:
+                res = await speech_stt(file=file)
+            else:
+                res = await speech_tts(text=text)
+        elif category == "3d":
+            res = await generate_3d(prompt=text)
+        else:
+            res = {"error": "Cannot classify request"}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Moderation failed: {str(e)}")
+        res = {"error": str(e)}
 
-    lower = text.lower()
-
-    # Map of category → (keywords, handler)
-    ROUTES = [
-        ("image", ["image", "picture", "draw", "painting", "generate image", "create image", "make me an image", "dall", "dalle", "dall-e", "dall e"], image_generate),
-        ("video", ["video", "create video", "generate video", "text2video", "make a video"], video_generate),
-        ("audio", ["audio", "song", "music", "synthesize voice", "tts", "text to speech"], speech_tts),
-        ("code", ["code", "function", "script", "implement", "write code", "program"], code_generate),
-        ("3d", ["3d", "mesh", "point cloud", "render 3d", "nerf"], generate_3d),
-    ]
-
-    try:
-        for cat, keywords, handler in ROUTES:
-            if any(k in lower for k in keywords):
-                if cat == "video":
-                    res = await handler(prompt=text, seconds=4)
-                elif cat == "image":
-                    res = await handler(prompt=text, samples=1)
-                else:
-                    res = await handler(text if handler == speech_tts else text)
-                return {"type": cat, "result": res}
-
-        # default text generation
-        res = await text_generate(prompt=text, category="text:chat", max_tokens=256)
-        return {"type": "text", "result": res}
-
-    except Exception as e:
-        return {"error": str(e)}
-        
+    return {"type": category, "result": res}
+    
 # ===============================
 # WebSocket streaming chat (improved with chunked streaming)
 # ===============================
