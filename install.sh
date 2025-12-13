@@ -1,67 +1,157 @@
 #!/bin/bash
-# ----------------------------
-# ZYNARA SUPER-Ultimate AUTO-INSTALLER
-# Deploy ultimate multimodal AI backend
-# ----------------------------
+# ==========================================
+# ZYNARA MEGA AI — RUNPOD AUTO INSTALL SCRIPT
+# ==========================================
 
-echo "🚀 Updating system..."
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y python3-pip git ffmpeg wget curl unzip
+set -e
 
-# ----------------------------
-# Create project directory
-# ----------------------------
-echo "📂 Creating project folder..."
-mkdir -p ~/zynara && cd ~/zynara
+echo "🚀 Zynara Mega AI Installer Starting..."
 
-# ----------------------------
-# Clone repo
-# ----------------------------
-if [ ! -d "./zynara-super" ]; then
-    echo "🌐 Cloning Zynara repository..."
-    git clone https://github.com/your/zynara-super.git
+# ------------------------------------------
+# System update
+# ------------------------------------------
+echo "🔄 Updating system packages..."
+apt update && apt upgrade -y
+
+# ------------------------------------------
+# Base dependencies
+# ------------------------------------------
+echo "📦 Installing system dependencies..."
+apt install -y \
+    python3 \
+    python3-pip \
+    python3-venv \
+    git \
+    ffmpeg \
+    wget \
+    curl \
+    unzip \
+    ca-certificates \
+    build-essential
+
+# ------------------------------------------
+# Project directory
+# ------------------------------------------
+echo "📂 Creating project directory..."
+mkdir -p /workspace/zynara
+cd /workspace/zynara
+
+# ------------------------------------------
+# Clone repository
+# ------------------------------------------
+if [ ! -d "zynara-backend" ]; then
+    echo "🌐 Cloning Zynara backend repo..."
+    git clone https://github.com/YOUR_GITHUB/zynara-backend.git
 fi
-cd zynara-super
 
-# ----------------------------
+cd zynara-backend
+
+# ------------------------------------------
+# Python virtual environment
+# ------------------------------------------
+echo "🐍 Creating virtual environment..."
+python3 -m venv venv
+source venv/bin/activate
+
+# ------------------------------------------
+# Upgrade pip
+# ------------------------------------------
+pip install --upgrade pip wheel setuptools
+
+# ------------------------------------------
 # Install Python dependencies
-# ----------------------------
-echo "📦 Installing Python packages..."
-pip3 install --upgrade pip
-pip3 install -r requirements.txt
+# ------------------------------------------
+echo "📦 Installing Python requirements..."
+pip install -r requirements.txt
 
-# ----------------------------
-# Create media/temp folders
-# ----------------------------
-mkdir -p /tmp/zynara/media
+# ------------------------------------------
+# Create temp + media dirs
+# ------------------------------------------
+echo "📁 Creating runtime directories..."
+mkdir -p /tmp/generated_images
+mkdir -p /tmp/zynara
+mkdir -p logs
 
-# ----------------------------
-# Environment variables
-# ----------------------------
-echo "🔑 Setting up environment variables..."
-cat <<EOT >> ~/.bashrc
-export APP_NAME="Zynara AI Super-Ultimate"
-export PORT=7860
-export HF_TOKEN="your_hf_token_here"
-export OPENAI_API_KEY="your_openai_key_here"
-export ELEVEN_API_KEY="your_elevenlabs_key_here"
-export SUPABASE_URL="your_supabase_url_here"
-export SUPABASE_KEY="your_supabase_key_here"
-export REDIS_URL="your_redis_url_here"
-export TMP_DIR="/tmp/zynara"
-export USE_HF_INFERENCE=1
-EOT
-source ~/.bashrc
+# ------------------------------------------
+# Environment variables (.env)
+# ------------------------------------------
+echo "🔑 Writing .env file..."
 
-# ----------------------------
-# Start server in background
-# ----------------------------
-echo "🚀 Starting Zynara server..."
-nohup uvicorn main:app --host 0.0.0.0 --port $PORT > server.log 2>&1 &
+cat <<EOF > .env
+APP_NAME=Zynara Mega AI
+APP_AUTHOR=GoldBoy
+APP_DESCRIPTION=Multi-modal AI backend
 
-# ----------------------------
-# Show info
-# ----------------------------
-echo "✅ Zynara Super-Ultimate is running!"
-echo "Access docs at: http://YOUR_PUBLIC_IP:7860/docs"
-echo "Logs: ~/zynara/zynara-super/server.log"
+PORT=7860
+
+HF_TOKEN=hf_XXXXXXXXXXXXXXXXXXXX
+USE_HF_INFERENCE=1
+
+OPENAI_API_KEY=sk-XXXXXXXXXXXXXXXXXXXX
+
+SUPABASE_URL=https://your-supabase-url.supabase.co
+SUPABASE_KEY=your-supabase-key
+
+REDIS_URL=redis://localhost:6379/0
+
+ELEVEN_API_KEY=XXXXXXXXXXXXXXXXXXXX
+OPENWEATHER_KEY=XXXXXXXXXXXXXXXXXXXX
+WOLFRAM_KEY=XXXXXXXXXXXXXXXXXXXX
+SERPAPI_KEY=XXXXXXXXXXXXXXXXXXXX
+
+DISABLE_MULTIMODAL=0
+
+# IMPORTANT FOR FRONTEND ACCESS
+ALLOWED_ORIGINS=*
+
+IMAGES_DIR=/tmp/generated_images
+EOF
+
+echo "✅ .env created"
+
+# ------------------------------------------
+# Export env vars for current shell
+# ------------------------------------------
+export $(grep -v '^#' .env | xargs)
+
+# ------------------------------------------
+# Optional: Redis (local)
+# ------------------------------------------
+echo "🧠 Installing Redis..."
+apt install -y redis-server
+systemctl enable redis
+systemctl start redis
+
+# ------------------------------------------
+# Launch server
+# ------------------------------------------
+echo "🚀 Starting Zynara Mega AI backend..."
+
+nohup venv/bin/uvicorn main:app \
+    --host 0.0.0.0 \
+    --port ${PORT} \
+    --workers 1 \
+    > logs/server.log 2>&1 &
+
+sleep 3
+
+# ------------------------------------------
+# Show final info
+# ------------------------------------------
+PUBLIC_IP=$(curl -s ifconfig.me || echo "<RUNPOD_PUBLIC_IP>")
+
+echo "=========================================="
+echo "✅ ZYNARA MEGA AI IS LIVE"
+echo "=========================================="
+echo "🌍 Public API URL:"
+echo "   http://${PUBLIC_IP}:${PORT}"
+echo ""
+echo "📘 Swagger Docs:"
+echo "   http://${PUBLIC_IP}:${PORT}/docs"
+echo ""
+echo "🧠 Health Check:"
+echo "   http://${PUBLIC_IP}:${PORT}/health"
+echo ""
+echo "📂 Logs:"
+echo "   /workspace/zynara/zynara-backend/logs/server.log"
+echo "=========================================="
