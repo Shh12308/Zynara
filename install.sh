@@ -33,8 +33,8 @@ apt install -y \
 # Project directory
 # ------------------------------------------
 echo "📂 Creating project directory..."
-mkdir -p /workspace/zynara
-cd /workspace/zynara
+mkdir -p /workspace/Zynara
+cd /workspace/Zynara
 
 # ------------------------------------------
 # Clone repository
@@ -44,7 +44,7 @@ if [ ! -d "zynara-backend" ]; then
     git clone https://github.com/Shh12308/Zynara.git
 fi
 
-cd zynara-backend
+cd Zynara
 
 # ------------------------------------------
 # Python virtual environment
