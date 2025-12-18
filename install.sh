@@ -41,7 +41,7 @@ cd /workspace/zynara
 # ------------------------------------------
 if [ ! -d "zynara-backend" ]; then
     echo "🌐 Cloning Zynara backend repo..."
-    git clone https://github.com/YOUR_GITHUB/zynara-backend.git
+    git clone https://github.com/Shh12308/zynara-backend.git
 fi
 
 cd zynara-backend
@@ -79,7 +79,7 @@ echo "🔑 Writing .env file..."
 
 cat <<EOF > .env
 APP_NAME=Zynara Mega AI
-APP_AUTHOR=GoldBoy
+APP_AUTHOR=GoldYLocks
 APP_DESCRIPTION=Multi-modal AI backend
 
 PORT=7860
