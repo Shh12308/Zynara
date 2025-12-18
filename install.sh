@@ -41,7 +41,7 @@ cd /workspace/zynara
 # ------------------------------------------
 if [ ! -d "zynara-backend" ]; then
     echo "🌐 Cloning Zynara backend repo..."
-    git clone https://github.com/Shh12308/zynara-backend.git
+    git clone https://github.com/Shh12308/Zynara.git
 fi
 
 cd zynara-backend
