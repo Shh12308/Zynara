@@ -1,6 +1,7 @@
 #!/bin/bash
 # ==========================================
 # ZYNARA MEGA AI — RUNPOD AUTO INSTALL SCRIPT
+# (Assumes: already inside /workspace/Zynara)
 # ==========================================
 
 set -e
@@ -30,21 +31,13 @@ apt install -y \
     build-essential
 
 # ------------------------------------------
-# Project directory
+# Sanity check
 # ------------------------------------------
-echo "📂 Creating project directory..."
-mkdir -p /workspace/Zynara
-cd /workspace/Zynara
-
-# ------------------------------------------
-# Clone repository
-# ------------------------------------------
-if [ ! -d "zynara-backend" ]; then
-    echo "🌐 Cloning Zynara backend repo..."
-    git clone https://github.com/Shh12308/Zynara.git
+if [ ! -f "requirements.txt" ]; then
+    echo "❌ ERROR: requirements.txt not found"
+    echo "➡️ Make sure you are inside the Zynara project directory"
+    exit 1
 fi
-
-cd Zynara
 
 # ------------------------------------------
 # Python virtual environment
@@ -56,7 +49,7 @@ source venv/bin/activate
 # ------------------------------------------
 # Upgrade pip
 # ------------------------------------------
-pip install --upgrade pip wheel setuptools
+pip install --upgrade pip setuptools wheel
 
 # ------------------------------------------
 # Install Python dependencies
@@ -65,7 +58,7 @@ echo "📦 Installing Python requirements..."
 pip install -r requirements.txt
 
 # ------------------------------------------
-# Create temp + media dirs
+# Create runtime directories
 # ------------------------------------------
 echo "📁 Creating runtime directories..."
 mkdir -p /tmp/generated_images
@@ -84,24 +77,17 @@ APP_DESCRIPTION=Multi-modal AI backend
 
 PORT=7860
 
-HF_TOKEN=hf_XXXXXXXXXXXXXXXXXXXX
-USE_HF_INFERENCE=1
-
 OPENAI_API_KEY=sk-XXXXXXXXXXXXXXXXXXXX
+GROQ_API_KEY=gsk_XXXXXXXXXXXXXXXXXXXX
 
 SUPABASE_URL=https://your-supabase-url.supabase.co
 SUPABASE_KEY=your-supabase-key
 
+# Optional services
 REDIS_URL=redis://localhost:6379/0
-
 ELEVEN_API_KEY=XXXXXXXXXXXXXXXXXXXX
-OPENWEATHER_KEY=XXXXXXXXXXXXXXXXXXXX
-WOLFRAM_KEY=XXXXXXXXXXXXXXXXXXXX
-SERPAPI_KEY=XXXXXXXXXXXXXXXXXXXX
 
 DISABLE_MULTIMODAL=0
-
-# IMPORTANT FOR FRONTEND ACCESS
 ALLOWED_ORIGINS=*
 
 IMAGES_DIR=/tmp/generated_images
@@ -115,19 +101,19 @@ echo "✅ .env created"
 export $(grep -v '^#' .env | xargs)
 
 # ------------------------------------------
-# Optional: Redis (local)
+# Optional: Redis (LOCAL ONLY)
 # ------------------------------------------
-echo "🧠 Installing Redis..."
-apt install -y redis-server
-systemctl enable redis
-systemctl start redis
+echo "🧠 Installing Redis (optional)..."
+apt install -y redis-server || true
+systemctl enable redis || true
+systemctl start redis || true
 
 # ------------------------------------------
 # Launch server
 # ------------------------------------------
 echo "🚀 Starting Zynara Mega AI backend..."
 
-nohup venv/bin/uvicorn main:app \
+nohup venv/bin/uvicorn app:app \
     --host 0.0.0.0 \
     --port ${PORT} \
     --workers 1 \
@@ -149,9 +135,6 @@ echo ""
 echo "📘 Swagger Docs:"
 echo "   http://${PUBLIC_IP}:${PORT}/docs"
 echo ""
-echo "🧠 Health Check:"
-echo "   http://${PUBLIC_IP}:${PORT}/health"
-echo ""
 echo "📂 Logs:"
-echo "   /workspace/zynara/zynara-backend/logs/server.log"
+echo "   $(pwd)/logs/server.log"
 echo "=========================================="
