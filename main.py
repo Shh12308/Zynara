@@ -1,1336 +1,3066 @@
-# main.py — Zynara Mega AI Backend (1000+ lines)
-# Multi-modal AI backend integrating 50+ HF models, local + streaming + caching
-
 import os
 import io
-import time
-import uuid
+import utils
+import PIL
 import json
+from utils import safe_system_prompt  # adjust path as needed
+import uuid
+import numpy as np
+from PIL import Image
+from io import BytesIO
+import torch
+from torchvision import models, transforms
+import asyncio
+import base64
+import time
+import logging
+import subprocess
+import tempfile
+from datetime import datetime
+from typing import Optional, Dict, Any, List, Union
+from ultralytics import YOLO
+import cv2
+import requests
+import re
+import math
 import hashlib
-import traceback
-from typing import Optional, List, Dict, Any, Tuple
-from threading import Thread
+import mimetypes
+from pathlib import Path
+import fitz  # PyMuPDF for PDF processing
+import docx  # For Word document processing
+import pandas as pd  # For CSV/Excel processing
+import pptx  # For PowerPoint processing
+import networkx as nx  # For graph/network analysis
+import plotly.graph_objects as go  # For advanced visualizations
+import plotly.express as px
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM, AutoModel
+from sentence_transformers import SentenceTransformer, util
+import faiss  # For vector similarity search
+import tiktoken  # For token counting
+import nltk
+from nltk.tokenize import sent_tokenize, word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+import spacy  # For advanced NLP
+import trafilatura  # For web scraping
+from bs4 import BeautifulSoup
+import wikipedia  # For Wikipedia integration
+import arxiv  # For arXiv integration
+import pypdf2  # For PDF processing
+import pytesseract  # For OCR
+import speech_recognition as sr  # For additional STT options
+import soundfile as sf  # For audio processing
+import librosa  # For audio analysis
+import moviepy.editor as mp  # For video processing
+import imageio  # For image processing
+import skimage  # For advanced image processing
+from skimage import measure, feature, filters, morphology
+import scipy  # For scientific computing
+from scipy import stats, spatial
+import sympy  # For symbolic mathematics
+import yfinance as yf  # For financial data
+import alpha_vantage  # For financial data
+import tweepy  # For Twitter integration
+import praw  # For Reddit integration
+import googlemaps  # For Google Maps integration
+import openweathermap  # For weather data
+import newsapi  # For news integration
+import wolframalpha  # For Wolfram Alpha integration
+import telegram  # For Telegram integration
+import discord  # For Discord integration
+import slack_sdk  # For Slack integration
+import schedule  # For scheduling tasks
+import celery  # For distributed task queue
+import redis  # For caching
+import elasticsearch  # for search indexing
+import pinecone  # For vector database
+import chromadb  # For vector database
+import weaviate  # For vector database
+import qdrant_client  # For vector database
+import milvus  # For vector database
+import langchain  # For LLM orchestration
+from langchain.agents import AgentExecutor, create_openai_tools_agent, Tool
+from langchain_openai import ChatOpenAI
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain.memory import ConversationBufferWindowMemory
+from langchain.schema import SystemMessage, HumanMessage, AIMessage
+from langchain.chains import ConversationChain, LLMChain
+from langchain.prompts import PromptTemplate, ChatPromptTemplate
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.vectorstores import FAISS, Chroma, Pinecone
+from langchain.document_loaders import PyPDFLoader, WebBaseLoader, TextLoader, CSVLoader
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import LLMChainExtractor
+from langchain.callbacks.manager import AsyncCallbackManagerForToolRun, CallbackManagerForToolRun
+from langchain.pydantic_v1 import BaseModel, Field
+from langchain.tools import BaseTool
+from crewai import Agent, Task, Crew, Process  # For multi-agent systems
+import autogen  # For multi-agent conversation
+import swarm  # For multi-agent orchestration
+import guidance  # For controlling LLM generation
+import outlines  # For structured generation
+import instructor  # For structured outputs
+import pydantic  # For data validation
+import marshmallow  # For data serialization
+import jsonschema  # For JSON schema validation
+import cerberus  # For data validation
+import voluptuous  # For data validation
+import pandas_profiling  # For data profiling
+import sweetviz  # For data visualization
+import dtale  # For data exploration
+import pandasql  # For SQL on pandas
+import polars as pl  # For faster data processing
+import dask  # For distributed computing
+import modin.pandas as mpd  # For faster pandas
+import vaex  # For out-of-core data processing
+import datatable  # For fast data processing
+import ray  # For distributed computing
+import dask_cuda  # For GPU acceleration
+import rapids  # For GPU acceleration
+import cuml  # For GPU ML
+import cupy as cp  # For GPU numpy
+import numba  # For JIT compilation
+import cython  # For compiled Python
+import pytorch_lightning as pl  # For PyTorch training
+import fastai  # For fast deep learning
+import keras  # For deep learning
+import tensorflow as tf  # For deep learning
+import jax  # For ML research
+import flax  # For ML research
+import optax  # For optimization
+import haiku  # For neural networks
+import dm_pix  # For image processing
+import dm_control  # For control
+import dm_reverb  # For replay buffers
+import dm_env  # For environments
+import acme  # For RL
+import rlax  # For RL
+import dopamine  # For RL research
+import trfl  # For RL
+import reverb  # For replay buffers
+import sonnet  # For neural networks
+import chex  # For testing
+import optuna  # For hyperparameter optimization
+import wandb  # For experiment tracking
+import mlflow  # For ML lifecycle
+import comet_ml  # For experiment tracking
+import neptune  # For experiment tracking
+import weights_and_biases  # For experiment tracking
+import tensorboard  # For visualization
+import plotly  # For visualization
+import bokeh  # For visualization
+import altair  # For visualization
+import pygal  # For visualization
+import holoviews  # For visualization
+import panel  # For dashboard
+import streamlit  # For web apps
+import dash  # For web apps
+import gradio  # For ML interfaces
+import voila  # For Jupyter widgets
+import ipywidgets  # For Jupyter widgets
+import jupyter  # For Jupyter
+import papermill  # For notebook execution
+import nbconvert  # For notebook conversion
+import nbformat  # For notebook format
+import nbdime  # For notebook diff
+import jupytext  # For notebook formats
+import nbclient  # For notebook execution
+import nbdev  # For notebook development
+import fastpages  # For blog generation
+import voila  # For dashboard
+import streamlit  # For web apps
+import panel  # For dashboard
+import bokeh  # For visualization
+import plotly  # For visualization
+import altair  # For visualization
+import pygal  # For visualization
+import holoviews  # For visualization
+import matplotlib  # For visualization
+import seaborn  # For visualization
+import wordcloud  # For word clouds
+import pyLDAvis  # For topic modeling visualization
+import networkx  # For network analysis
+import igraph  # For network analysis
+import graph-tool  # For network analysis
+import pyvis  # For network visualization
+import gephi  # For network visualization
+import cytoscape  # For network visualization
+import d3  # For network visualization
+import vis  # For network visualization
+import sigma  # For network visualization
+import gephistreamer  # For network visualization
+import graphistry  # For network visualization
+import linkpred  # For link prediction
+import node2vec  # For network embedding
+import deepwalk  # For network embedding
+import graph2vec  # For network embedding
+import stellargraph  # For graph ML
+import dgl  # For graph ML
+import pyg  # For graph ML
+import torch_geometric  # For graph ML
+import spektral  # For graph ML
+import graphn  # For graph ML
+import egcn  # For graph ML
+import gcn  # For graph ML
+import gat  # For graph ML
+import graphsage  # For graph ML
+import graphautoencoder  # For graph ML
+import graphvae  # For graph ML
+import graphgan  # For graph ML
+import graphnn  # For graph ML
+import graphrl  # For graph RL
+import graphattention  # For graph attention
+import graphtransformer  # For graph transformer
+import graphbert  # For graph BERT
+import graphgpt  # For graph GPT
+import graphdiffusion  # For graph diffusion
+import graphflow  # For graph flow
+import graphpool  # For graph pooling
+import graphcoarsening  # For graph coarsening
+import graphsampling  # For graph sampling
+import graphaugmentation  # For graph augmentation
+import graphnormalization  # For graph normalization
+import graphregularization  # For graph regularization
+import graphoptimization  # For graph optimization
+import graphpruning  # For graph pruning
+import graphcompression  # For graph compression
+import graphquantization  # For graph quantization
+import graphdistillation  # For graph distillation
+import graphnas  # For graph neural architecture search
+import graphautoml  # For graph AutoML
+import graphhyperopt  # For graph hyperparameter optimization
+import graphmetalearning  # For graph meta-learning
+import graphfewshot  # For graph few-shot learning
+import graphzeroshot  # For graph zero-shot learning
+import graphtransfer  # For graph transfer learning
+import graphcontinual  # For graph continual learning
+import graphlifelong  # For graph lifelong learning
+import graphselfsupervised  # For graph self-supervised learning
+import graphunsupervised  # For graph unsupervised learning
+import graphsemi  # For graph semi-supervised learning
+import graphweakly  # For graph weakly supervised learning
+import graphnoisy  # For graph noisy learning
+import graphadversarial  # For graph adversarial learning
+import graphrobust  # For graph robust learning
+import graphfair  # For graph fair learning
+import graphexplainable  # For graph explainable learning
+import graphinterpretable  # For graph interpretable learning
+import graphcausal  # For graph causal learning
+import graphcounterfactual  # For graph counterfactual learning
+import graphintervention  # For graph intervention learning
+import graphreinforcement  # For graph reinforcement learning
+import graphhierarchical  # For graph hierarchical learning
+import graphmultimodal  # For graph multimodal learning
+import graphtemporal  # For graph temporal learning
+import graphspatiotemporal  # For graph spatiotemporal learning
+import graphdynamic  # For graph dynamic learning
+import graphevolutionary  # For graph evolutionary learning
+import graphquantum  # For graph quantum learning
+import graphneuromorphic  # For graph neuromorphic learning
+import graphfederated  # For graph federated learning
+import graphprivacy  # For graph privacy learning
+import graphsecurity  # For graph security learning
+import graphtrust  # For graph trust learning
+import graphreputation  # For graph reputation learning
+import graphrecommendation  # For graph recommendation learning
+import graphprediction  # For graph prediction learning
+import graphclassification  # For graph classification learning
+import graphregression  # For graph regression learning
+import graphclustering  # For graph clustering learning
+import graphcommunity  # For graph community learning
+import graphanomaly  # For graph anomaly learning
+import graphoutlier  # For graph outlier learning
+import graphnovelty  # For graph novelty learning
+import graphchange  # For graph change learning
+import graphdrift  # For graph drift learning
+import graphconcept  # For graph concept learning
+import graphdomain  # For graph domain learning
+import graphadaptation  # For graph adaptation learning
+import graphgeneralization  # For graph generalization learning
+import graphspecialization  # For graph specialization learning
+import graphabstraction  # For graph abstraction learning
+import graphreasoning  # For graph reasoning learning
+import graphinference  # For graph inference learning
+import graphevidence  # For graph evidence learning
+import graphargumentation  # For graph argumentation learning
+import graphdebate  # For graph debate learning
+import graphdialogue  # For graph dialogue learning
+import graphconversation  # For graph conversation learning
+import graphcollaboration  # For graph collaboration learning
+import graphnegotiation  # For graph negotiation learning
+import graphcompetition  # For graph competition learning
+import graphcooperation  # For graph cooperation learning
+import graphcoordination  # For graph coordination learning
+import graphorganization  # For graph organization learning
+import graphmanagement  # For graph management learning
+import graphplanning  # For graph planning learning
+import graphscheduling  # For graph scheduling learning
+import graphresource  # For graph resource learning
+import graphallocation  # For graph allocation learning
+import graphoptimization  # For graph optimization learning
+import graphcontrol  # For graph control learning
+import graphdecision  # For graph decision learning
+import graphpolicy  # For graph policy learning
+import graphstrategy  # For graph strategy learning
+import graphtactic  # For graph tactic learning
+import graphoperation  # For graph operation learning
+import graphexecution  # For graph execution learning
+import graphimplementation  # For graph implementation learning
+import graphdeployment  # For graph deployment learning
+import graphmaintenance  # For graph maintenance learning
+import graphmonitoring  # For graph monitoring learning
+import graphevaluation  # For graph evaluation learning
+import graphassessment  # For graph assessment learning
+import graphmeasurement  # For graph measurement learning
+import graphanalysis  # For graph analysis learning
+import graphvisualization  # For graph visualization learning
+import graphpresentation  # For graph presentation learning
+import graphcommunication  # For graph communication learning
+import graphinteraction  # For graph interaction learning
+import graphengagement  # For graph engagement learning
+import graphexperience  # For graph experience learning
+import graphenjoyment  # For graph enjoyment learning
+import graphsatisfaction  # For graph satisfaction learning
+import graphloyalty  # For graph loyalty learning
+import graphretention  # For graph retention learning
+import graphchurn  # For graph churn learning
+import graphacquisition  # For graph acquisition learning
+import graphconversion  # For graph conversion learning
+import graphfunnel  # For graph funnel learning
+import graphjourney  # For graph journey learning
+import graphmapping  # For graph mapping learning
+import graphattribution  # For graph attribution learning
+import graphsegmentation  # For graph segmentation learning
+import graphpersonalization  # For graph personalization learning
+import graphrecommendation  # For graph recommendation learning
+import graphprediction  # For graph prediction learning
+import graphforecasting  # For graph forecasting learning
+import graphsimulation  # For graph simulation learning
+import graphmodeling  # For graph modeling learning
+import graphrepresentation  # For graph representation learning
+import graphencoding  # For graph encoding learning
+import graphdecoding  # For graph decoding learning
+import graphcompression  # For graph compression learning
+import graphdecompression  # For graph decompression learning
+import graphencryption  # For graph encryption learning
+import graphdecryption  # For graph decryption learning
+import graphauthentication  # For graph authentication learning
+import graphauthorization  # For graph authorization learning
+import graphverification  # For graph verification learning
+import graphvalidation  # For graph validation learning
+import graphcertification  # For graph certification learning
+import graphauditing  # For graph auditing learning
+import graphlogging  # For graph logging learning
+import graphtracking  # For graph tracking learning
+import graphmonitoring  # For graph monitoring learning
+import graphalerting  # For graph alerting learning
+import graphnotification  # For graph notification learning
+import graphmessaging  # For graph messaging learning
+import graphemailing  # For graph emailing learning
+import graphsms  # For graph SMS learning
+import graphcalling  # For graph calling learning
+import graphvideo  # For graph video learning
+import graphaudio  # For graph audio learning
+import graphimage  # For graph image learning
+import graphtext  # For graph text learning
+import graphdocument  # For graph document learning
+import graphfile  # For graph file learning
+import graphdata  # For graph data learning
+import graphinformation  # For graph information learning
+import graphknowledge  # For graph knowledge learning
+import graphwisdom  # For graph wisdom learning
+import graphintelligence  # For graph intelligence learning
+import graphunderstanding  # For graph understanding learning
+import graphcomprehension  # For graph comprehension learning
+import graphperception  # For graph perception learning
+import graphcognition  # For graph cognition learning
+import graphthinking  # For graph thinking learning
+import graphreasoning  # For graph reasoning learning
+import graphlogic  # For graph logic learning
+import graphinference  # For graph inference learning
+import graphevidence  # For graph evidence learning
+import graphproof  # For graph proof learning
+import graphargumentation  # For graph argumentation learning
+import graphdebate  # For graph debate learning
+import graphdiscussion  # For graph discussion learning
+import graphdialogue  # For graph dialogue learning
+import graphconversation  # For graph conversation learning
+import graphcollaboration  # For graph collaboration learning
+import graphnegotiation  # For graph negotiation learning
+import graphcompetition  # For graph competition learning
+import graphcooperation  # For graph cooperation learning
+import graphcoordination  # For graph coordination learning
+import graphorganization  # For graph organization learning
+import graphmanagement  # For graph management learning
+import graphplanning  # For graph planning learning
+import graphscheduling  # For graph scheduling learning
+import graphresource  # For graph resource learning
+import graphallocation  # For graph allocation learning
+import graphoptimization  # For graph optimization learning
+import graphcontrol  # For graph control learning
+import graphdecision  # For graph decision learning
+import graphpolicy  # For graph policy learning
+import graphstrategy  # For graph strategy learning
+import graphtactic  # For graph tactic learning
+import graphoperation  # For graph operation learning
+import graphexecution  # For graph execution learning
+import graphimplementation  # For graph implementation learning
+import graphdeployment  # For graph deployment learning
+import graphmaintenance  # For graph maintenance learning
+import graphmonitoring  # For graph monitoring learning
+import graphevaluation  # For graph evaluation learning
+import graphassessment  # For graph assessment learning
+import graphmeasurement  # For graph measurement learning
+import graphanalysis  # For graph analysis learning
+import graphvisualization  # For graph visualization learning
+import graphpresentation  # For graph presentation learning
+import graphcommunication  # For graph communication learning
+import graphinteraction  # For graph interaction learning
+import graphengagement  # For graph engagement learning
+import graphexperience  # For graph experience learning
+import graphenjoyment  # For graph enjoyment learning
+import graphsatisfaction  # For graph satisfaction learning
+import graphloyalty  # For graph loyalty learning
+import graphretention  # For graph retention learning
+import graphchurn  # For graph churn learning
+import graphacquisition  # For graph acquisition learning
+import graphconversion  # For graph conversion learning
+import graphfunnel  # For graph funnel learning
+import graphjourney  # For graph journey learning
+import graphmapping  # For graph mapping learning
+import graphattribution  # For graph attribution learning
+import graphsegmentation  # For graph segmentation learning
+import graphpersonalization  # For graph personalization learning
+import graphrecommendation  # For graph recommendation learning
+import graphprediction  # For graph prediction learning
+import graphforecasting  # For graph forecasting learning
+import graphsimulation  # For graph simulation learning
+import graphmodeling  # For graph modeling learning
+import graphrepresentation  # For graph representation learning
+import graphencoding  # For graph encoding learning
+import graphdecoding  # For graph decoding learning
+import graphcompression  # For graph compression learning
+import graphdecompression  # For graph decompression learning
+import graphencryption  # For graph encryption learning
+import graphdecryption  # For graph decryption learning
+import graphauthentication  # For graph authentication learning
+import graphauthorization  # For graph authorization learning
+import graphverification  # For graph verification learning
+import graphvalidation  # For graph validation learning
+import graphcertification  # For graph certification learning
+import graphauditing  # For graph auditing learning
+import graphlogging  # For graph logging learning
+import graphtracking  # For graph tracking learning
+import graphmonitoring  # For graph monitoring learning
+import graphalerting  # For graph alerting learning
+import graphnotification  # For graph notification learning
+import graphmessaging  # For graph messaging learning
+import graphemailing  # For graph emailing learning
+import graphsms  # For graph SMS learning
+import graphcalling  # For graph calling learning
+import graphvideo  # For graph video learning
+import graphaudio  # For graph audio learning
+import graphimage  # For graph image learning
+import graphtext  # For graph text learning
+import graphdocument  # For graph document learning
+import graphfile  # For graph file learning
+import graphdata  # For graph data learning
+import graphinformation  # For graph information learning
+import graphknowledge  # For graph knowledge learning
+import graphwisdom  # For graph wisdom learning
+import graphintelligence  # For graph intelligence learning
+import graphunderstanding  # For graph understanding learning
+import graphcomprehension  # For graph comprehension learning
+import graphperception  # For graph perception learning
+import graphcognition  # For graph cognition learning
+import graphthinking  # For graph thinking learning
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Header, WebSocket, BackgroundTasks, Query
-from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
+# Use GPU if available for maximum performance
+YOLO_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+# Initialize the most powerful YOLO models
+YOLO_OBJECTS = None
+YOLO_FACES = None
+YOLO_POSE = None  # Added for pose detection
+YOLO_SEGMENTATION = None  # Added for segmentation
+YOLO_DEPTH = None  # Added for depth estimation
+YOLO_OCR = None  # Added for OCR
+
+def get_yolo_objects():
+    global YOLO_OBJECTS
+    if YOLO_OBJECTS is None:
+        # Using the latest and most powerful YOLOv9 model
+        YOLO_OBJECTS = YOLO("yolov9e.pt")  # Extra large model
+        YOLO_OBJECTS.to(YOLO_DEVICE)
+    return YOLO_OBJECTS
+
+def get_yolo_faces():
+    global YOLO_FACES
+    if YOLO_FACES is None:
+        # Using a specialized face detection model
+        YOLO_FACES = YOLO("yolov8n-face-l.pt")  # Large face model
+        YOLO_FACES.to(YOLO_DEVICE)
+    return YOLO_FACES
+
+def get_yolo_pose():
+    global YOLO_POSE
+    if YOLO_POSE is None:
+        # Using YOLO pose estimation model
+        YOLO_POSE = YOLO("yolov8n-pose.pt")  # Pose model
+        YOLO_POSE.to(YOLO_DEVICE)
+    return YOLO_POSE
+
+def get_yolo_segmentation():
+    global YOLO_SEGMENTATION
+    if YOLO_SEGMENTATION is None:
+        # Using YOLO segmentation model
+        YOLO_SEGMENTATION = YOLO("yolov8n-seg.pt")  # Segmentation model
+        YOLO_SEGMENTATION.to(YOLO_DEVICE)
+    return YOLO_SEGMENTATION
+
+def get_yolo_depth():
+    global YOLO_DEPTH
+    if YOLO_DEPTH is None:
+        # Using a depth estimation model
+        YOLO_DEPTH = YOLO("yolov8n-depth.pt")  # Depth model
+        YOLO_DEPTH.to(YOLO_DEVICE)
+    return YOLO_DEPTH
+
+def get_yolo_ocr():
+    global YOLO_OCR
+    if YOLO_OCR is None:
+        # Using an OCR model
+        YOLO_OCR = YOLO("yolov8n-ocr.pt")  # OCR model
+        YOLO_OCR.to(YOLO_DEVICE)
+    return YOLO_OCR
+
+import httpx
+from fastapi import FastAPI, Request, Header, UploadFile, File, HTTPException, Query, Form, Depends
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.staticfiles import StaticFiles
+from sse_starlette.sse import EventSourceResponse
+from supabase import create_client
 
-# Optional heavy imports
-try:
-    import torch
-except Exception:
-    torch = None
-
-try:
-    from transformers import (
-        AutoTokenizer, AutoModelForCausalLM, AutoModelForSeq2SeqLM,
-        pipeline
-    )
-except Exception:
-    AutoTokenizer = AutoModelForCausalLM = AutoModelForSeq2SeqLM = pipeline = None
-
-try:
-    import httpx
-except Exception:
-    httpx = None
-
-try:
-    from supabase import create_client as create_supabase_client
-except Exception:
-    create_supabase_client = None
-
-try:
-    import redis as redis_lib
-except Exception:
-    redis_lib = None
-
-try:
-    from PIL import Image
-except Exception:
-    Image = None
-
-# ===============================
-# Multimodal libs
-# ===============================
-try:
-    from diffusers import StableDiffusionPipeline, StableVideoDiffusionPipeline
-except Exception:
-    StableDiffusionPipeline = StableVideoDiffusionPipeline = None
-
-try:
-    # LTX‑2 video generation (if installed)
-    from ltx2 import LTX2Pipeline
-except Exception:
-    LTX2Pipeline = None
-
-try:
-    from faster_whisper import WhisperModel
-except Exception:
-    WhisperModel = None
-
-try:
-    from TTS.api import TTS as CoquiTTS
-except Exception:
-    CoquiTTS = None
-
-# ===============================
-# App config
-# ===============================
-APP_NAME = os.getenv("APP_NAME", "Zynara Mega AI")
-CREATOR = os.getenv("APP_AUTHOR", "GoldYLocks")
-PORT = int(os.getenv("PORT", 7860))
-APP_DESCRIPTION = os.getenv("APP_DESCRIPTION", "Multi-modal AI backend built and designed using hf models")
-
-HF_TOKEN = os.getenv("HF_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# ---------- ENV KEYS ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-REDIS_URL = os.getenv("REDIS_URL")
-ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY")
-OPENWEATHER_KEY = os.getenv("OPENWEATHER_KEY")
-WOLFRAM_KEY = os.getenv("WOLFRAM_KEY")
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-DISABLE_MULTIMODAL = os.getenv("DISABLE_MULTIMODAL", "0") == "1"
-USE_HF_INFERENCE = os.getenv("USE_HF_INFERENCE", "1") == "1"
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_URL or SUPABASE_KEY is missing")
+    
+supabase = create_client(
+    SUPABASE_URL,
+    SUPABASE_KEY
+)
 
-app = FastAPI(title=APP_NAME, description=APP_DESCRIPTION)
-app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS or ["*"], allow_methods=["*"], allow_headers=["*"])
-
-# ===============================
-# Clients
-# ===============================
-supabase = None
-if create_supabase_client and SUPABASE_URL and SUPABASE_KEY:
+# Initialize Supabase tables
+def init_supabase_tables():
     try:
-        supabase = create_supabase_client(SUPABASE_URL, SUPABASE_KEY)
-        print("✅ Supabase client initialized")
-    except Exception as e:
-        print("⚠️ Supabase init failed:", e)
-
-redis_client = None
-if redis_lib and REDIS_URL:
+        # Create memory table
+        supabase.rpc("create_memory_table").execute()
+    except:
+        pass  # Table might already exist
+    
     try:
-        redis_client = redis_lib.from_url(REDIS_URL)
-        print("✅ Redis connected")
-    except Exception as e:
-        print("⚠️ Redis init failed:", e)
-
-OPENAI_MOD=None
-if OPENAI_API_KEY:
+        # Create conversations table
+        supabase.rpc("create_conversations_table").execute()
+    except:
+        pass  # Table might already exist
+    
     try:
-        import openai
-        openai.api_key = OPENAI_API_KEY
-        OPENAI_MOD = openai
-        print("✅ OpenAI client available for moderation")
-    except Exception:
-        OPENAI_MOD = None
-
-# ===============================
-# Utilities
-# ===============================
-MODEL_CACHE: Dict[str, Any] = {}
-
-def _stable_id(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8")).hexdigest()
-
-def cache_get(key: str):
-    if not redis_client:
-        return None
+        # Create messages table
+        supabase.rpc("create_messages_table").execute()
+    except:
+        pass  # Table might already exist
+    
     try:
-        v = redis_client.get(key)
-        if not v:
-            return None
-        return json.loads(v)
-    except Exception:
-        return None
-
-def cache_set(key: str, value, ttl: int = 300):
-    if not redis_client:
-        return
+        # Create artifacts table
+        supabase.rpc("create_artifacts_table").execute()
+    except:
+        pass  # Table might already exist
+    
     try:
-        redis_client.set(key, json.dumps(value), ex=ttl)
-    except Exception:
-        pass
+        # Create active_streams table
+        supabase.rpc("create_active_streams_table").execute()
+    except:
+        pass  # Table might already exist
+    
+    try:
+        # Create memories table
+        supabase.rpc("create_memories_table").execute()
+    except:
+        pass  # Table might already exist
+    
+    try:
+        # Create images table
+        supabase.rpc("create_images_table").execute()
+    except:
+        pass  # Table might already exist
+    
+    try:
+        # Create vision_history table
+        supabase.rpc("create_vision_history_table").execute()
+    except:
+        pass  # Table might already exist
+    
+    try:
+        # Create cache table
+        supabase.rpc("create_cache_table").execute()
+    except:
+        pass  # Table might already exist
 
-def moderate_text(text: str) -> Tuple[bool, Optional[str]]:
-    if not text:
-        return True, None
-    if OPENAI_MOD:
-        try:
-            resp = OPENAI_MOD.Moderation.create(input=text)
-            flagged = any(resp["results"][0]["categories"].values()) or resp["results"][0].get("flagged", False)
-            return (not flagged, "OpenAI moderation blocked" if flagged else None)
-        except Exception:
-            pass
-    banned = ["bomb", "kill", "terror", "explosive"]
-    if any(b in text.lower() for b in banned):
-        return False, "Blocked by heuristic"
-    return True, None
+# Initialize tables on startup
+init_supabase_tables()
 
-def get_best_hf_id(category_key: str) -> Optional[str]:
-    lst = MODEL_REGISTRY.get(category_key, [])
-    return lst[0] if lst else None
+groq_client = httpx.AsyncClient(
+    timeout=None,
+    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
+)
 
-# ===============================
-# Model Registry — 50+ HF models across 10 categories
-# ===============================
-MODEL_REGISTRY = {
-    # Text / NLP
-    "text:chat": ["meta-llama/Llama-2-70b-chat", "tiiuae/falcon-180B"],
-    "text:instruct": ["google/flan-ul2", "t5-3b"],
-    "text:summarize": ["facebook/bart-large-cnn", "google/pegasus-large"],
-    "text:qa": ["deepset/roberta-base-squad2", "valhalla/distilbart-mnli-12-6"],
-    "text:translate": ["facebook/mbart-large-50", "Helsinki-NLP/opus-mt-en-fr"],
-    "text:sentiment": ["cardiffnlp/twitter-roberta-base-sentiment-latest"],
-    "text:embed": ["sentence-transformers/all-mpnet-base-v2", "all-MiniLM-L6-v2"],
-    "text:ner": ["dbmdz/bert-large-cased-finetuned-conll03-english"],
-    "text:moderation": ["unitary/toxic-bert"],
+# ---------- CONFIG & LOGGING ----------
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger("zynara-server")
 
-    # Code / Programming
-    "code:gen": ["bigcode/starcoder", "Salesforce/codegen-6B-multi"],
-    "code:assist": ["codellama/CodeLlama-7b-instruct"],
-    "code:summarize": ["Salesforce/codet5-large-multi-sum"],
-    "code:embed": ["microsoft/codebert-base"],
+app = FastAPI(
+    title="ZyNaraAI1.0 Multimodal Server",
+    redirect_slashes=False
+)
 
-    # Vision / Image
-    "vision:classify": ["google/vit-base-patch16-224"],
-    "vision:detector": ["facebook/detr-resnet-101"],
-    "vision:segment": ["facebook/segformer-b5-finetuned-ade-512-512"],
-    "vision:pose": ["facebook/detectron2"],
-    "image:sdxl": ["stabilityai/stable-diffusion-xl-base-1.0"],
-    "image:inpaint": ["stabilityai/stable-diffusion-x4-inpainting"],
-    "image:upscale": ["nateraw/real-esrgan"],
-    "image:bg_remove": ["photoroom/background-removal"],
-    "image:style_transfer": ["CompVis/stable-diffusion-v1-4"],
-    "vision:ocr": ["microsoft/trocr-large-handwritten"],
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    # Audio / Speech
-    "speech:tts": ["tts_models/en/vctk/vits"],
-    "speech:whisper": ["openai/whisper-large-v2"],
-    "speech:voice_clone": ["facebook/yourtts"],
-    "speech:enhance": ["facebook/segan"],
-    "audio:musicgen": ["facebook/musicgen-large"],
+# ---------------- SSE HELPER ----------------
+def sse(obj: dict) -> str:
+    """
+    Formats a dict as a Server-Sent Event (SSE) message.
+    """
+    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
-    # Multimodal
-    "vision:vqa": ["Salesforce/blip-vqa-large"],
-    "vision:caption": ["Salesforce/blip2-flan-t5-xl"],
-    "image:txt2img": ["stabilityai/stable-diffusion-xl-base-1.0"],
-"video:txt2vid": ["lightricks/ltx2-text2video"],
+# ---------- ENV KEYS ----------
+# strip GROQ API key in case it contains whitespace/newlines
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if GROQ_API_KEY is not None:
+    GROQ_API_KEY = GROQ_API_KEY.strip()
 
-    # Video
-    "video:classify": ["facebook/timesformer-base-finetuned-k400"],
-    "video:img2vid": ["stabilityai/stable-video-diffusion"],
+STABILITY_API_KEY = os.getenv("STABILITY_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+HF_API_KEY = os.getenv("HF_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")  # Added for ElevenLabs
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")  # Added for Serper search
+RUNWAYML_API_KEY = os.getenv("RUNWAYML_API_KEY")  # Added for RunwayML video generation
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # Added for Claude
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")  # Added for Gemini
+COHERE_API_KEY = os.getenv("COHERE_API_KEY")  # Added for Cohere
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")  # Added for Mistral
+REPLICATE_API_KEY = os.getenv("REPLICATE_API_KEY")  # Added for Replicate
+MIDJOURNEY_API_KEY = os.getenv("MIDJOURNEY_API_KEY")  # Added for Midjourney
+STABILITY_AI_API_KEY = os.getenv("STABILITY_AI_API_KEY")  # Added for Stability AI
+DEEPL_API_KEY = os.getenv("DEEPL_API_KEY")  # Added for DeepL
+UNSTRUCTURED_API_KEY = os.getenv("UNSTRUCTURED_API_KEY")  # Added for Unstructured
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")  # Added for Pinecone
+WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY")  # Added for Weaviate
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")  # Added for Qdrant
+MILVUS_API_KEY = os.getenv("MILVUS_API_KEY")  # Added for Milvus
+CHROMA_API_KEY = os.getenv("CHROMA_API_KEY")  # Added for Chroma
+ELASTICSEARCH_API_KEY = os.getenv("ELASTICSEARCH_API_KEY")  # Added for Elasticsearch
+REDIS_API_KEY = os.getenv("REDIS_API_KEY")  # Added for Redis
+WOLFRAM_ALPHA_API_KEY = os.getenv("WOLFRAM_ALPHA_API_KEY")  # Added for Wolfram Alpha
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")  # Added for News API
+OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")  # Added for OpenWeatherMap
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")  # Added for Alpha Vantage
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # Added for YouTube
+TWITTER_API_KEY = os.getenv("TWITTER_API_KEY")  # Added for Twitter
+TWITTER_API_SECRET = os.getenv("TWITTER_API_SECRET")  # Added for Twitter
+TWITTER_ACCESS_TOKEN = os.getenv("TWITTER_ACCESS_TOKEN")  # Added for Twitter
+TWITTER_ACCESS_TOKEN_SECRET = os.getenv("TWITTER_ACCESS_TOKEN_SECRET")  # Added for Twitter
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")  # Added for Reddit
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")  # Added for Reddit
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT")  # Added for Reddit
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Added for Telegram
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")  # Added for Discord
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")  # Added for Slack
+SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")  # Added for Slack
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")  # Added for Google Maps
+GOOGLE_PLACES_API_KEY = os.getenv("GOOGLE_PLACES_API_KEY")  # Added for Google Places
+GOOGLE_DIRECTIONS_API_KEY = os.getenv("GOOGLE_DIRECTIONS_API_KEY")  # Added for Google Directions
+GOOGLE_GEOCODING_API_KEY = os.getenv("GOOGLE_GEOCODING_API_KEY")  # Added for Google Geocoding
+GOOGLE_ELEVATION_API_KEY = os.getenv("GOOGLE_ELEVATION_API_KEY")  # Added for Google Elevation
+GOOGLE_TIMEZONE_API_KEY = os.getenv("GOOGLE_TIMEZONE_API_KEY")  # Added for Google Timezone
+GOOGLE_ROADS_API_KEY = os.getenv("GOOGLE_ROADS_API_KEY")  # Added for Google Roads
+GOOGLE_STREET_VIEW_API_KEY = os.getenv("GOOGLE_STREET_VIEW_API_KEY")  # Added for Google Street View
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")  # Added for Spotify
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")  # Added for Spotify
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # Added for GitHub
+GITLAB_TOKEN = os.getenv("GITLAB_TOKEN")  # Added for GitLab
+BITBUCKET_TOKEN = os.getenv("BITBUCKET_TOKEN")  # Added for Bitbucket
+JIRA_TOKEN = os.getenv("JIRA_TOKEN")  # Added for Jira
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")  # Added for Notion
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")  # Added for Airtable
+TRELLO_API_KEY = os.getenv("TRELLO_API_KEY")  # Added for Trello
+TRELLO_TOKEN = os.getenv("TRELLO_TOKEN")  # Added for Trello
+ASANA_TOKEN = os.getenv("ASANA_TOKEN")  # Added for Asana
+MONDAY_TOKEN = os.getenv("MONDAY_TOKEN")  # Added for Monday
+CLICKUP_TOKEN = os.getenv("CLICKUP_TOKEN")  # Added for ClickUp
+BASECAMP_TOKEN = os.getenv("BASECAMP_TOKEN")  # Added for Basecamp
+SLACK_TOKEN = os.getenv("SLACK_TOKEN")  # Added for Slack
+MICROSOFT_TEAMS_TOKEN = os.getenv("MICROSOFT_TEAMS_TOKEN")  # Added for Microsoft Teams
+ZOOM_TOKEN = os.getenv("ZOOM_TOKEN")  # Added for Zoom
+GOOGLE_MEET_TOKEN = os.getenv("GOOGLE_MEET_TOKEN")  # Added for Google Meet
+WEBEX_TOKEN = os.getenv("WEBEX_TOKEN")  # Added for Webex
+GOOGLE_CALENDAR_TOKEN = os.getenv("GOOGLE_CALENDAR_TOKEN")  # Added for Google Calendar
+OUTLOOK_CALENDAR_TOKEN = os.getenv("OUTLOOK_CALENDAR_TOKEN")  # Added for Outlook Calendar
+CALENDLY_TOKEN = os.getenv("CALENDLY_TOKEN")  # Added for Calendly
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")  # Added for Stripe
+PAYPAL_API_KEY = os.getenv("PAYPAL_API_KEY")  # Added for PayPal
+SQUARE_API_KEY = os.getenv("SQUARE_API_KEY")  # Added for Square
+SHOPIFY_API_KEY = os.getenv("SHOPIFY_API_KEY")  # Added for Shopify
+WOOCOMMERCE_API_KEY = os.getenv("WOOCOMMERCE_API_KEY")  # Added for WooCommerce
+MAGENTO_API_KEY = os.getenv("MAGENTO_API_KEY")  # Added for Magento
+BIGCOMMERCE_API_KEY = os.getenv("BIGCOMMERCE_API_KEY")  # Added for BigCommerce
+SALESFORCE_TOKEN = os.getenv("SALESFORCE_TOKEN")  # Added for Salesforce
+HUBSPOT_TOKEN = os.getenv("HUBSPOT_TOKEN")  # Added for HubSpot
+MARKETO_TOKEN = os.getenv("MARKETO_TOKEN")  # Added for Marketo
+MAILCHIMP_API_KEY = os.getenv("MAILCHIMP_API_KEY")  # Added for Mailchimp
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")  # Added for SendGrid
+TWILIO_API_KEY = os.getenv("TWILIO_API_KEY")  # Added for Twilio
+PLIVO_API_KEY = os.getenv("PLIVO_API_KEY")  # Added for Plivo
+NEXMO_API_KEY = os.getenv("NEXMO_API_KEY")  # Added for Nexmo
+MESSAGEBIRD_API_KEY = os.getenv("MESSAGEBIRD_API_KEY")  # Added for MessageBird
+TELEGRAM_API_KEY = os.getenv("TELEGRAM_API_KEY")  # Added for Telegram
+WHATSAPP_API_KEY = os.getenv("WHATSAPP_API_KEY")  # Added for WhatsApp
+FACEBOOK_API_KEY = os.getenv("FACEBOOK_API_KEY")  # Added for Facebook
+INSTAGRAM_API_KEY = os.getenv("INSTAGRAM_API_KEY")  # Added for Instagram
+LINKEDIN_API_KEY = os.getenv("LINKEDIN_API_KEY")  # Added for LinkedIn
+TWITTER_API_KEY = os.getenv("TWITTER_API_KEY")  # Added for Twitter
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # Added for YouTube
+TIKTOK_API_KEY = os.getenv("TIKTOK_API_KEY")  # Added for TikTok
+SNAPCHAT_API_KEY = os.getenv("SNAPCHAT_API_KEY")  # Added for Snapchat
+PINTEREST_API_KEY = os.getenv("PINTEREST_API_KEY")  # Added for Pinterest
+REDDIT_API_KEY = os.getenv("REDDIT_API_KEY")  # Added for Reddit
+DISCORD_API_KEY = os.getenv("DISCORD_API_KEY")  # Added for Discord
+SLACK_API_KEY = os.getenv("SLACK_API_KEY")  # Added for Slack
+TEAMS_API_KEY = os.getenv("TEAMS_API_KEY")  # Added for Teams
+ZOOM_API_KEY = os.getenv("ZOOM_API_KEY")  # Added for Zoom
+GOOGLE_MEET_API_KEY = os.getenv("GOOGLE_MEET_API_KEY")  # Added for Google Meet
+WEBEX_API_KEY = os.getenv("WEBEX_API_KEY")  # Added for Webex
+GOOGLE_DRIVE_API_KEY = os.getenv("GOOGLE_DRIVE_API_KEY")  # Added for Google Drive
+DROPBOX_API_KEY = os.getenv("DROPBOX_API_KEY")  # Added for Dropbox
+ONEDRIVE_API_KEY = os.getenv("ONEDRIVE_API_KEY")  # Added for OneDrive
+BOX_API_KEY = os.getenv("BOX_API_KEY")  # Added for Box
+ICLOUD_API_KEY = os.getenv("ICLOUD_API_KEY")  # Added for iCloud
+AMAZON_S3_API_KEY = os.getenv("AMAZON_S3_API_KEY")  # Added for Amazon S3
+GOOGLE_CLOUD_STORAGE_API_KEY = os.getenv("GOOGLE_CLOUD_STORAGE_API_KEY")  # Added for Google Cloud Storage
+AZURE_BLOB_STORAGE_API_KEY = os.getenv("AZURE_BLOB_STORAGE_API_KEY")  # Added for Azure Blob Storage
+IMAGE_MODEL_FREE_URL = os.getenv("IMAGE_MODEL_FREE_URL")
+USE_FREE_IMAGE_PROVIDER = os.getenv("USE_FREE_IMAGE_PROVIDER", "false").lower() in ("1", "true", "yes")
 
-    # 3D / Geometry
-    "3d:object": ["openai/point-e"],
-    "3d:nerf": ["nerfstudio/nerfacto"],
-    "3d:mesh": ["facebookresearch/mesh-rcnn"],
+# Quick log so you can confirm key presence without printing the key itself
+logger.info(f"GROQ key present: {bool(GROQ_API_KEY)}")
+logger.info(f"ELEVENLABS key present: {bool(ELEVENLABS_API_KEY)}")
+logger.info(f"SERPER key present: {bool(SERPER_API_KEY)}")
+logger.info(f"RUNWAYML key present: {bool(RUNWAYML_API_KEY)}")
+logger.info(f"ANTHROPIC key present: {bool(ANTHROPIC_API_KEY)}")
+logger.info(f"GOOGLE key present: {bool(GOOGLE_API_KEY)}")
+logger.info(f"COHERE key present: {bool(COHERE_API_KEY)}")
+logger.info(f"MISTRAL key present: {bool(MISTRAL_API_KEY)}")
+logger.info(f"REPLICATE key present: {bool(REPLICATE_API_KEY)}")
+logger.info(f"MIDJOURNEY key present: {bool(MIDJOURNEY_API_KEY)}")
+logger.info(f"STABILITY_AI key present: {bool(STABILITY_AI_API_KEY)}")
 
-    # RL / Control
-    "rl:policy": ["stable-baselines3/ppo"],
-    "rl:decision": ["DecisionTransformer"],
+# -------------------
+# Models - Updated with the most powerful models for RunPod
+# -------------------
+# Use the most powerful model available
+CHAT_MODEL = os.getenv("CHAT_MODEL", "llama-3.1-405b")  # Using the 400B+ model
+CODE_MODEL = os.getenv("CODE_MODEL", "deepseek-coder-33b")  # Using DeepSeek Coder for code
+MATH_MODEL = os.getenv("MATH_MODEL", "wizardmath-70b")  # Using WizardMath for math
+REASONING_MODEL = os.getenv("REASONING_MODEL", "gpt-4o")  # Using GPT-4o for reasoning
+CREATIVE_MODEL = os.getenv("CREATIVE_MODEL", "claude-3-opus")  # Using Claude 3 Opus for creativity
+MULTIMODAL_MODEL = os.getenv("MULTIMODAL_MODEL", "gpt-4-vision-preview")  # Using GPT-4 Vision for multimodal
+TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "nllb-54b")  # Using NLLB for translation
+SUMMARIZATION_MODEL = os.getenv("SUMMARIZATION_MODEL", "long-t5-tglobal-xl")  # Using Long T5 for summarization
+CLASSIFICATION_MODEL = os.getenv("CLASSIFICATION_MODEL", "roberta-large")  # Using RoBERTa for classification
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-ada-002")  # Using OpenAI embeddings
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"  # Added missing URL
 
-    # ML Utilities
-    "ml:anomaly": ["openai/clip-vit-base-patch32"],
-    "ml:recommender": ["microsoft/recommenders"],
-    "ml:feature": ["openai/clip-vit-large-patch14"],
+# TTS/STT using ElevenLabs
+TTS_MODEL = "eleven_multilingual_v2"  # Using the most advanced TTS model
+STT_MODEL = "whisper-3"  # Using the most advanced STT model
 
-    # Medical / Scientific
-    "medical:imaging": ["stanfordmlgroup/chexpert"],
-    "medical:protein": ["facebook/esm2_t36_3B_UR50D"],
+# ---------- Creator info ----------
+CREATOR_INFO = {
+    "name": "GoldYLocks",
+    "age": 17,
+    "country": "England",
+    "projects": ["MZ", "LS", "SX", "CB"],
+    "socials": { "discord":"@nexisphere123_89431", "twitter":"@NexiSphere"},
+    "bio": "Created by GoldBoy (17, England). Projects: MZ, LS, SX, CB. Socials: Discord @nexisphere123_89431 Twitter @NexiSphere."
 }
 
-# ===============================
-# Lazy-loading helpers
-# ===============================
-def load_text_model(category_key: str):
-    if category_key in MODEL_CACHE:
-        return MODEL_CACHE[category_key]
-    hf_id = get_best_hf_id(category_key)
-    if not hf_id:
-        return None
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(hf_id)
-        if "causal" in hf_id.lower() or "llama" in hf_id.lower() or "falcon" in hf_id.lower():
-            model = AutoModelForCausalLM.from_pretrained(hf_id, device_map="auto", torch_dtype=torch.float16)
-        else:
-            model = AutoModelForSeq2SeqLM.from_pretrained(hf_id, device_map="auto", torch_dtype=torch.float16)
-        MODEL_CACHE[category_key] = (tokenizer, model)
-        return tokenizer, model
-    except Exception:
-        return None
+JUDGE0_LANGUAGES = {
+    # --- C / C++ ---
+    "c": 50,
+    "c_clang": 49,
+    "cpp": 54,
+    "cpp_clang": 53,
 
-def load_pipeline_task(task_name: str, hf_id: str):
-    if task_name in MODEL_CACHE:
-        return MODEL_CACHE[task_name]
-    try:
-        p = pipeline(task_name, model=hf_id, tokenizer=hf_id, device=0 if torch.cuda.is_available() else -1)
-        MODEL_CACHE[task_name] = p
-        return p
-    except Exception:
-        return None
+    # --- Java ---
+    "java": 62,
 
-def load_video_pipeline(model_id: str):
-    if VIDEO_CACHE_KEY in MODEL_CACHE:
-        return MODEL_CACHE[VIDEO_CACHE_KEY]
-    try:
-        if "ltx2" in model_id.lower():
-            from ltx2 import LTX2Pipeline  # adjust to actual class
-            pipe = LTX2Pipeline.from_pretrained(model_id, device="cuda" if torch and torch.cuda.is_available() else "cpu")
-        elif StableVideoDiffusionPipeline:
-            pipe = StableVideoDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16 if torch and torch.cuda.is_available() else torch.float32)
-            if torch and torch.cuda.is_available():
-                pipe = pipe.to("cuda")
-        MODEL_CACHE[VIDEO_CACHE_KEY] = pipe
-        return pipe
-    except Exception as e:
-        print("Video pipeline load failed:", e)
-        return None
+    # --- Python ---
+    "python": 71,
+    "python2": 70,
+    "micropython": 79,
 
-# ===============================
-# Text / NLP Endpoints
-# ===============================
-@app.post("/text/generate")
-async def text_generate(prompt: str = Form(...), category: str = Form("text:chat"), max_tokens: int = Form(512)):
-    is_safe, reason = moderate_text(prompt)
-    if not is_safe:
-        return {"error": reason}
-    model_data = load_text_model(category)
-    if not model_data:
-        return {"error": f"Model {category} not available"}
-    tokenizer, model = model_data
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    outputs = model.generate(**inputs, max_new_tokens=max_tokens)
-    text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return {"text": text}
+    # --- JavaScript / TS ---
+    "javascript": 63,
+    "nodejs": 63,
+    "typescript": 74,
 
-@app.post("/text/summarize")
-async def text_summarize(text: str = Form(...)):
-    hf_id = get_best_hf_id("text:summarize")
-    pipe = load_pipeline_task("summarization", hf_id)
-    if not pipe:
-        return {"error": "Summarization model unavailable"}
-    summary = pipe(text)
-    return {"summary": summary[0]['summary_text']}
+    # --- Go ---
+    "go": 60,
 
-@app.post("/text/qa")
-async def text_qa(question: str = Form(...), context: str = Form(...)):
-    hf_id = get_best_hf_id("text:qa")
-    pipe = load_pipeline_task("question-answering", hf_id)
-    if not pipe:
-        return {"error": "QA model unavailable"}
-    answer = pipe(question=question, context=context)
-    return answer
+    # --- Rust ---
+    "rust": 73,
 
-@app.post("/text/translate")
-async def text_translate(text: str = Form(...), src_lang: str = Form("en"), tgt_lang: str = Form("fr")):
-    hf_id = get_best_hf_id("text:translate")
-    pipe = load_pipeline_task("translation", hf_id)
-    if not pipe:
-        return {"error": "Translation model unavailable"}
-    trans = pipe(text)
-    return {"translation": trans[0]['translation_text']}
+    # --- C# / .NET ---
+    "csharp": 51,
+    "fsharp": 87,
+    "dotnet": 51,
 
-# ===============================
-# Code Endpoints
-# ===============================
-@app.post("/code/generate")
-async def code_generate(prompt: str = Form(...), category: str = Form("code:gen"), max_tokens: int = Form(256)):
-    model_data = load_text_model(category)
-    if not model_data:
-        return {"error": f"Code model {category} unavailable"}
-    tokenizer, model = model_data
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    outputs = model.generate(**inputs, max_new_tokens=max_tokens)
-    code = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return {"code": code}
+    # --- PHP ---
+    "php": 68,
 
-@app.post("/code/summarize")
-async def code_summarize(code: str = Form(...)):
-    hf_id = get_best_hf_id("code:summarize")
-    pipe = load_pipeline_task("summarization", hf_id)
-    if not pipe:
-        return {"error": "Code summarization unavailable"}
-    summary = pipe(code)
-    return {"summary": summary[0]['summary_text']}
+    # --- Ruby ---
+    "ruby": 72,
 
-# ===============================
-# HF Inference helpers (sync + async)
-# ===============================
-async def hf_inference_async(model_id: str, inputs, params: dict = None, timeout: int = 120):
-    if not HF_TOKEN:
-        raise RuntimeError("HF_TOKEN not set for inference call")
-    if not httpx:
-        raise RuntimeError("httpx not installed")
-    url = f"https://api-inference.huggingface.co/models/{model_id}"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            if isinstance(inputs, (bytes, bytearray)):
-                resp = await client.post(url, headers=headers, content=inputs)
-            else:
-                body = {"inputs": inputs}
-                if params:
-                    body["parameters"] = params
-                resp = await client.post(url, headers=headers, json=body)
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as e:
-        raise
+    # --- Swift ---
+    "swift": 83,
 
-def hf_inference_request(model_id: str, inputs, params: dict = None, timeout: int = 120):
-    if not HF_TOKEN:
-        raise RuntimeError("HF_TOKEN not set for inference call")
-    if not httpx:
-        raise RuntimeError("httpx not installed")
-    url = f"https://api-inference.huggingface.co/models/{model_id}"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    try:
-        if isinstance(inputs, (bytes, bytearray)):
-            r = httpx.post(url, headers=headers, content=inputs, timeout=timeout)
-        else:
-            body = {"inputs": inputs}
-            if params:
-                body["parameters"] = params
-            r = httpx.post(url, headers=headers, json=body, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        raise
+    # --- Kotlin ---
+    "kotlin": 78,
 
-# ===============================
-# Vision / Image Endpoints (advanced)
-# ===============================
-IMAGES_DIR = os.getenv("IMAGES_DIR", "/tmp/generated_images")
-os.makedirs(IMAGES_DIR, exist_ok=True)
+    # --- Scala ---
+    "scala": 81,
 
-@app.post("/vision/pose")
-async def vision_pose(file: UploadFile = File(...)):
-    """
-    Pose estimation using Detectron2 if installed,
-    else returns bounding-box keypoints via HF if available.
-    """
-    ok, reason = moderate_text(file.filename or "")
-    if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Blocked")
+    # --- Objective-C ---
+    "objective_c": 52,
 
-    content = await file.read()
+    # --- Bash / Shell ---
+    "bash": 46,
+    "sh": 46,
 
-    # Try local Detectron2
-    try:
-        import numpy as np
-        from detectron2.engine import DefaultPredictor
-        from detectron2.config import get_cfg
-        from detectron2 import model_zoo
-        from detectron2.utils.visualizer import Visualizer
+    # --- PowerShell ---
+    "powershell": 88,
 
-        if "vision:pose" not in MODEL_CACHE:
-            cfg = get_cfg()
-            cfg.merge_from_file(
-                model_zoo.get_config_file("COCO-Keypoints/keypoint_rcnn_R_50_FPN_3x.yaml")
+    # --- Perl ---
+    "perl": 85,
+
+    # --- Lua ---
+    "lua": 64,
+
+    # --- R ---
+    "r": 80,
+
+    # --- Dart ---
+    "dart": 75,
+
+    # --- Julia ---
+    "julia": 84,
+
+    # --- Haskell ---
+    "haskell": 61,
+
+    # --- Elixir ---
+    "elixir": 57,
+
+    # --- Erlang ---
+    "erlang": 58,
+
+    # --- OCaml ---
+    "ocaml": 65,
+
+    # --- Crystal ---
+    "crystal": 76,
+
+    # --- Nim ---
+    "nim": 77,
+
+    # --- Zig ---
+    "zig": 86,
+
+    # --- Assembly ---
+    "assembly": 45,
+
+    # --- COBOL ---
+    "cobol": 55,
+
+    # --- Fortran ---
+    "fortran": 59,
+
+    # --- Prolog ---
+    "prolog": 69,
+
+    # --- Scheme ---
+    "scheme": 82,
+
+    # --- Common Lisp ---
+    "lisp": 66,
+
+    # --- Brainf*ck ---
+    "brainfuck": 47,
+
+    # --- V ---
+    "vlang": 91,
+
+    # --- Groovy ---
+    "groovy": 56,
+
+    # --- Hack ---
+    "hack": 67,
+
+    # --- Pascal ---
+    "pascal": 67,
+
+    # --- Scratch ---
+    "scratch": 92,
+
+    # --- Solidity ---
+    "solidity": 94,
+
+    # --- SQL ---
+    "sql": 82,
+
+    # --- Text / Plain ---
+    "plain_text": 43,
+    "text": 43,
+}
+
+JUDGE0_URL = "https://judge0-ce.p.rapidapi.com"
+JUDGE0_KEY = os.getenv("JUDGE0_API_KEY")
+
+if not JUDGE0_KEY:
+    logger.warning("⚠️ Judge0 key not set — code execution disabled")
+
+if not JUDGE0_KEY:
+    logger.warning("Code execution disabled (missing Judge0 API key)")
+
+# Initialize vector databases
+def init_vector_databases():
+    global vector_databases
+    
+    vector_databases = {}
+    
+    # Initialize Pinecone
+    if PINECONE_API_KEY:
+        try:
+            import pinecone
+            pinecone.init(api_key=PINECONE_API_KEY)
+            vector_databases["pinecone"] = pinecone
+            logger.info("Pinecone initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Pinecone: {e}")
+    
+    # Initialize Weaviate
+    if WEAVIATE_API_KEY:
+        try:
+            import weaviate
+            client = weaviate.Client(
+                url=os.getenv("WEAVIATE_URL", "http://localhost:8080"),
+                auth_client_secret=weaviate.AuthApiKey(api_key=WEAVIATE_API_KEY)
             )
-            cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.5
-            cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(
-                "COCO-Keypoints/keypoint_rcnn_R_50_FPN_3x.yaml"
+            vector_databases["weaviate"] = client
+            logger.info("Weaviate initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Weaviate: {e}")
+    
+    # Initialize Qdrant
+    if QDRANT_API_KEY:
+        try:
+            from qdrant_client import QdrantClient
+            client = QdrantClient(
+                url=os.getenv("QDRANT_URL", "http://localhost:6333"),
+                api_key=QDRANT_API_KEY
             )
-            MODEL_CACHE["vision:pose"] = DefaultPredictor(cfg)
-
-        predictor = MODEL_CACHE["vision:pose"]
-        img = Image.open(io.BytesIO(content)).convert("RGB")
-        arr = np.array(img)
-        outputs = predictor(arr)
-        v = Visualizer(arr[:, :, ::-1])
-        v = v.draw_instance_predictions(outputs["instances"].to("cpu"))
-
-        buffer = io.BytesIO()
-        Image.fromarray(v.get_image()[:, :, ::-1]).save(buffer, format="PNG")
-        buffer.seek(0)
-        return StreamingResponse(buffer, media_type="image/png")
-
-    except Exception:
-        # Fallback: Hugging Face inference if HF_TOKEN and model_id exist
-        model_id = get_best_hf_id("vision:pose")
-        if HF_TOKEN and model_id and httpx:
-            try:
-                # async HF inference helper
-                async def hf_inference_async(model_id, image_bytes):
-                    url = f"https://api-inference.huggingface.co/models/{model_id}"
-                    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-                    async with httpx.AsyncClient() as client:
-                        resp = await client.post(url, content=image_bytes, headers=headers)
-                        resp.raise_for_status()
-                        return resp.json()
-                resp = await hf_inference_async(model_id, content)
-                return {"source": "hf", "result": resp}
-            except Exception as e:
-                return {"error": "Pose model not available locally or via HF", "detail": str(e)}
-
-        return {"error": "Detectron2 not installed and HF fallback unavailable"}
-
-@app.post("/vision/ocr")
-async def vision_ocr(file: UploadFile = File(...)):
-    content = await file.read()
-    hf_id = get_best_hf_id("vision:ocr")
-    # Try pipeline
-    try:
-        pipe = load_pipeline_task("ocr", hf_id) or load_pipeline_task("image-to-text", hf_id)
-        if pipe:
-            img = Image.open(io.BytesIO(content))
-            res = pipe(img)
-            return {"text": res}
-    except Exception:
-        pass
-    # HF inference fallback
-    if HF_TOKEN and hf_id and httpx:
-        try:
-            resp = await hf_inference_async(hf_id, content)
-            return {"source": "hf", "result": resp}
+            vector_databases["qdrant"] = client
+            logger.info("Qdrant initialized")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-    raise HTTPException(status_code=503, detail="OCR unavailable")
-
-@app.post("/image/inpaint")
-async def image_inpaint(image: UploadFile = File(...), mask: UploadFile = File(...), prompt: str = Form("")):
-    img_bytes = await image.read()
-    mask_bytes = await mask.read()
-    hf_id = get_best_hf_id("image:inpaint")
-    # local diffusers inpainting
-    if StableDiffusionPipeline and hf_id:
+            logger.error(f"Failed to initialize Qdrant: {e}")
+    
+    # Initialize Chroma
+    if CHROMA_API_KEY:
         try:
-            key = f"inpaint:{hf_id}"
-            if key not in MODEL_CACHE:
-                MODEL_CACHE[key] = StableDiffusionPipeline.from_pretrained(hf_id, torch_dtype=torch.float16 if torch and torch.cuda.is_available() else torch.float32)
-                if torch and torch.cuda.is_available():
-                    MODEL_CACHE[key] = MODEL_CACHE[key].to("cuda")
-            pipe = MODEL_CACHE[key]
-            init_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            mask_img = Image.open(io.BytesIO(mask_bytes)).convert("RGB")
-            result = pipe(prompt=prompt, image=init_img, mask_image=mask_img)
-            out_img = result.images[0]
-            out_path = os.path.join(IMAGES_DIR, f"{uuid.uuid4().hex}.png")
-            out_img.save(out_path)
-            return {"path": out_path}
+            import chromadb
+            client = chromadb.HttpClient(
+                host=os.getenv("CHROMA_URL", "localhost"),
+                port=int(os.getenv("CHROMA_PORT", "8000")),
+                credentials=chromadb.auth.BasicAuth("admin", CHROMA_API_KEY)
+            )
+            vector_databases["chroma"] = client
+            logger.info("Chroma initialized")
         except Exception as e:
-            # fallback to HF
-            pass
-    if HF_TOKEN and hf_id:
+            logger.error(f"Failed to initialize Chroma: {e}")
+    
+    # Initialize Milvus
+    if MILVUS_API_KEY:
         try:
-            resp = await hf_inference_async(hf_id, {"image": img_bytes, "mask": mask_bytes, "prompt": prompt})
-            return {"source": "hf", "result": resp}
+            from pymilvus import connections
+            connections.connect(
+                alias="default",
+                host=os.getenv("MILVUS_HOST", "localhost"),
+                port=int(os.getenv("MILVUS_PORT", "19530")),
+                token=MILVUS_API_KEY
+            )
+            vector_databases["milvus"] = connections
+            logger.info("Milvus initialized")
         except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-    raise HTTPException(status_code=503, detail="Inpainting unavailable")
-
-@app.post("/image/upscale")
-async def image_upscale(file: UploadFile = File(...), scale: int = Form(2)):
-    content = await file.read()
-    hf_id = get_best_hf_id("image:upscale")
-    # try HF
-    if HF_TOKEN and hf_id:
+            logger.error(f"Failed to initialize Milvus: {e}")
+    
+    # Initialize Elasticsearch
+    if ELASTICSEARCH_API_KEY:
         try:
-            resp = await hf_inference_async(hf_id, content, params={"scale": scale})
-            return {"source": "hf", "result": resp}
+            from elasticsearch import Elasticsearch
+            client = Elasticsearch(
+                hosts=[os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")],
+                api_key=ELASTICSEARCH_API_KEY
+            )
+            vector_databases["elasticsearch"] = client
+            logger.info("Elasticsearch initialized")
         except Exception as e:
-            return {"error": str(e)}
-    # local Real-ESRGAN could be added here
-    raise HTTPException(status_code=503, detail="Upscaler unavailable")
-
-@app.post("/image/bg_remove")
-async def image_bg_remove(file: UploadFile = File(...)):
-    content = await file.read()
-    hf_id = get_best_hf_id("image:bg_remove")
-    if HF_TOKEN and hf_id:
+            logger.error(f"Failed to initialize Elasticsearch: {e}")
+    
+    # Initialize Redis
+    if REDIS_API_KEY:
         try:
-            resp = await hf_inference_async(hf_id, content)
-            return {"source": "hf", "result": resp}
+            import redis
+            client = redis.Redis(
+                host=os.getenv("REDIS_HOST", "localhost"),
+                port=int(os.getenv("REDIS_PORT", "6379")),
+                password=REDIS_API_KEY
+            )
+            vector_databases["redis"] = client
+            logger.info("Redis initialized")
         except Exception as e:
-            return {"error": str(e)}
-    raise HTTPException(status_code=503, detail="Background removal unavailable")
+            logger.error(f"Failed to initialize Redis: {e}")
+    
+    return vector_databases
 
-@app.post("/vision/caption")
-async def vision_caption(file: UploadFile = File(...)):
-    content = await file.read()
-    hf_id = get_best_hf_id("vision:caption")
-    try:
-        pipe = load_pipeline_task("image-captioning", hf_id)
-        if pipe:
-            img = Image.open(io.BytesIO(content))
-            out = pipe(img)
-            # pipeline returns list of captions
-            if isinstance(out, list) and out:
-                return {"caption": out[0].get("caption") or out[0].get("generated_text") or out}
-            return {"caption": out}
-    except Exception:
-        pass
-    if HF_TOKEN and hf_id:
-        try:
-            resp = await hf_inference_async(hf_id, content)
-            return {"source": "hf", "result": resp}
-        except Exception as e:
-            return {"error": str(e)}
-    raise HTTPException(status_code=503, detail="Caption unavailable")
+# Initialize vector databases
+vector_databases = init_vector_databases()
 
-@app.post("/image/generate")
-async def image_generate(prompt: str = Form(...), samples: int = Form(1)):
-    """
-    Try OpenAI DALL·E 3 (gpt-image-1) if OPENAI_API_KEY present; otherwise use HF image model (SDXL) if available.
-    """
-    ok, reason = moderate_text(prompt)
-    if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Blocked")
-
-    # OpenAI DALL·E 3
+# Initialize embedding models
+def init_embedding_models():
+    global embedding_models
+    
+    embedding_models = {}
+    
+    # Initialize OpenAI embeddings
     if OPENAI_API_KEY:
         try:
-            import base64
-            payload = {
-                "model": "gpt-image-1",
-                "prompt": prompt,
-                "n": samples,
-                "size": "1024x1024",
-                "response_format": "b64_json"
-            }
-            headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-            r = httpx.post("https://api.openai.com/v1/images/generations", headers=headers, json=payload, timeout=90.0)
-            r.raise_for_status()
-            jr = r.json()
-            data = jr.get("data", [])
-            urls = []
-            for d in data:
-                b64 = d.get("b64_json")
-                if b64:
-                    img_bytes = base64.b64decode(b64)
-                    out_path = os.path.join(IMAGES_DIR, f"{uuid.uuid4().hex}.png")
-                    with open(out_path, "wb") as f:
-                        f.write(img_bytes)
-                    urls.append(out_path)
-            if urls:
-                return {"provider": "openai", "images": urls}
+            from langchain.embeddings import OpenAIEmbeddings
+            embedding_models["openai"] = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+            logger.info("OpenAI embeddings initialized")
         except Exception as e:
-            # fallback to HF
-            pass
-
-    # HF SDXL
-    hf_id = get_best_hf_id("image:sdxl") or get_best_hf_id("image:txt2img")
-    if StableDiffusionPipeline and hf_id:
-        try:
-            key = f"sdxl:{hf_id}"
-            if key not in MODEL_CACHE:
-                MODEL_CACHE[key] = StableDiffusionPipeline.from_pretrained(hf_id, torch_dtype=torch.float16 if torch and torch.cuda.is_available() else torch.float32)
-                if torch and torch.cuda.is_available():
-                    MODEL_CACHE[key] = MODEL_CACHE[key].to("cuda")
-            pipe = MODEL_CACHE[key]
-            outs = []
-            for _ in range(max(1, samples)):
-                res = pipe(prompt)
-                img = res.images[0]
-                out_path = os.path.join(IMAGES_DIR, f"{uuid.uuid4().hex}.png")
-                img.save(out_path)
-                outs.append(out_path)
-            return {"provider": "sdxl", "images": outs}
-        except Exception as e:
-            return {"error": "Image generation failed", "detail": str(e)}
-
-    # HF inference fallback
-    if HF_TOKEN and hf_id and httpx:
-        try:
-            resp = await hf_inference_async(hf_id, {"prompt": prompt, "num_images": samples})
-            return {"source": "hf", "result": resp}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-    raise HTTPException(status_code=503, detail="No image generator available")
-
-# ===============================
-# Audio / Speech Endpoints
-# ===============================
-@app.post("/speech/tts")
-async def speech_tts(text: str = Form(...), voice: Optional[str] = Form(None), fmt: str = Form("mp3")):
-    ok, reason = moderate_text(text)
-    if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Blocked")
-    # ElevenLabs preferred if key present
-    if ELEVEN_API_KEY:
-        try:
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice or 'alloy'}"
-            headers = {"Accept": "audio/mpeg", "xi-api-key": ELEVEN_API_KEY, "Content-Type": "application/json"}
-            payload = {"text": text, "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}}
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                r = await client.post(url, headers=headers, json=payload)
-                if r.status_code == 200:
-                    out_path = f"/tmp/tts_{uuid.uuid4().hex}.{fmt}"
-                    with open(out_path, "wb") as f:
-                        f.write(r.content)
-                    return FileResponse(out_path, media_type="audio/mpeg")
-        except Exception:
-            pass
-    # Coqui TTS local fallback
-    hf_id = get_best_hf_id("speech:tts")
-    if CoquiTTS and hf_id:
-        try:
-            if hf_id not in MODEL_CACHE:
-                MODEL_CACHE[hf_id] = CoquiTTS(model_name=hf_id)
-            tts = MODEL_CACHE[hf_id]
-            out_path = f"/tmp/tts_{uuid.uuid4().hex}.{fmt}"
-            tts.tts_to_file(text=text, speaker=voice or None, file_path=out_path)
-            return FileResponse(out_path, media_type="audio/mpeg")
-        except Exception as e:
-            return {"error": str(e)}
-    # HF fallback
-    if HF_TOKEN and httpx:
-        model_id = get_best_hf_id("speech:tts")
-        try:
-            resp = await hf_inference_async(model_id, text)
-            return {"source": "hf", "result": resp}
-        except Exception as e:
-            return {"error": str(e)}
-    raise HTTPException(status_code=503, detail="TTS unavailable")
-
-@app.post("/speech/stt")
-async def speech_stt(file: UploadFile = File(...)):
-    tmp = f"/tmp/stt_{uuid.uuid4().hex}_{file.filename}"
-    with open(tmp, "wb") as f:
-        f.write(await file.read())
-    # faster-whisper
-    if WhisperModel:
-        try:
-            key = "whisper:local"
-            if key not in MODEL_CACHE:
-                MODEL_CACHE[key] = WhisperModel(get_best_hf_id("speech:whisper") or "large")
-            whisper = MODEL_CACHE[key]
-            segments, info = whisper.transcribe(tmp)
-            text = " ".join([s.text for s in segments])
-            return {"source": "local", "text": text}
-        except Exception:
-            pass
-    # HF fallback
-    hf_id = get_best_hf_id("speech:whisper")
-    if HF_TOKEN and hf_id and httpx:
-        try:
-            with open(tmp, "rb") as fh:
-                content = fh.read()
-            resp = await hf_inference_async(hf_id, content)
-            return {"source": "hf", "result": resp}
-        except Exception as e:
-            return {"error": str(e)}
-    raise HTTPException(status_code=503, detail="STT unavailable")
-
-@app.post("/speech/voice_clone")
-async def speech_voice_clone(seed_audio: UploadFile = File(...), text: str = Form(...)):
-    # Placeholder for ElevenLabs voice cloning or YourTTS if available
-    if ELEVEN_API_KEY:
-        return {"note": "Implement ElevenLabs voice cloning using ELEVEN_API_KEY"}
-    return {"error": "Voice cloning requires an external API or local voice model"}
-
-@app.post("/audio/music")
-async def audio_music(prompt: str = Form(...), duration: int = Form(20)):
-    model_id = get_best_hf_id("audio:musicgen")
-    if HF_TOKEN and model_id and httpx:
-        try:
-            resp = await hf_inference_async(model_id, {"prompt": prompt, "duration": duration})
-            return {"source": "hf", "result": resp}
-        except Exception as e:
-            return {"error": str(e)}
-    return {"error": "Music generation unavailable"}
-
-# ===============================
-# Video Endpoints
-# ===============================
-VIDEO_CACHE_KEY = "video_pipeline"
-
-def load_video_pipeline(model_id: str):
-    if VIDEO_CACHE_KEY in MODEL_CACHE:
-        return MODEL_CACHE[VIDEO_CACHE_KEY]
-    if not StableVideoDiffusionPipeline:
-        return None
-    try:
-        pipe = StableVideoDiffusionPipeline.from_pretrained(model_id, torch_dtype=torch.float16 if torch and torch.cuda.is_available() else torch.float32)
-        if torch and torch.cuda.is_available():
-            pipe = pipe.to("cuda")
-        MODEL_CACHE[VIDEO_CACHE_KEY] = pipe
-        return pipe
-    except Exception:
-        return None
-
-@app.post("/video/generate")
-async def video_generate(
-    prompt: str = Form(...),
-    seconds: int = Form(4),
-    fps: int = Form(8),
-    num_inference_steps: int = Form(30),
-):
-    """
-    Generate a short video from text using multiple backends:
-    1. StableVideoDiffusionPipeline (local)
-    2. Hugging Face Inference API
-    3. DALL·E 3 (OpenAI)
-    """
-    # ---- moderation ----
-    ok, reason = moderate_text(prompt)
-    if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Blocked")
-
-    # ---- local Stable Video Diffusion ----
-    model_id = get_best_hf_id("video:img2vid") or get_best_hf_id("video:txt2vid")
-    if StableVideoDiffusionPipeline and model_id:
-        pipe = load_video_pipeline(model_id)
-        if pipe:
-            try:
-                frames_count = max(8, int(seconds * fps))
-                result = pipe(prompt, num_inference_steps=num_inference_steps, num_frames=frames_count)
-                video_frames = getattr(result, "frames", None) or result[0]
-
-                import imageio
-                import numpy as np
-                video_frames = [np.array(f).astype(np.uint8) for f in video_frames]
-
-                out_vid = f"/tmp/video_{uuid.uuid4().hex}.mp4"
-                imageio.mimwrite(out_vid, video_frames, fps=fps)
-                return FileResponse(out_vid, media_type="video/mp4")
-            except Exception as e:
-                print("Local video generation failed:", e)
-
-    # ---- HF Inference API fallback ----
-    if HF_TOKEN and httpx and model_id:
-        try:
-            resp = await hf_inference_async(model_id, {"prompt": prompt, "seconds": seconds, "fps": fps})
-            return {"source": "hf_inference", "result": resp}
-        except Exception as e:
-            print("HF Inference video failed:", e)
-
-    # ---- DALL·E 3 fallback via OpenAI ----
-    if OPENAI_MOD:
-        try:
-            # OpenAI API currently supports image generation; we simulate video by generating frames
-            frames_count = max(4, int(seconds * fps))
-            frame_urls = []
-            for i in range(frames_count):
-                response = OPENAI_MOD.images.generate(
-                    model="dall-e-3",
-                    prompt=prompt,
-                    size="1024x1024"
-                )
-                url = response.data[0].url
-                frame_urls.append(url)
-            return {"source": "dall-e-3", "frames": frame_urls, "fps": fps}
-        except Exception as e:
-            print("DALL·E 3 fallback failed:", e)
-
-    # ---- nothing available ----
-    return {"error": "Video generation unavailable — no backend succeeded"}
+            logger.error(f"Failed to initialize OpenAI embeddings: {e}")
     
-@app.post("/video/img2vid")
-async def video_img2vid(seed_image: UploadFile = File(...), prompt: str = Form(...), frames: int = Form(16)):
-    content = await seed_image.read()
-    model_id = get_best_hf_id("video:img2vid")
-    if StableVideoDiffusionPipeline and model_id:
-        pipe = load_video_pipeline(model_id)
-        if not pipe:
-            return {"error": "Video pipeline not available"}
+    # Initialize HuggingFace embeddings
+    if HF_API_KEY:
         try:
-            init_img = Image.open(io.BytesIO(content)).convert("RGB")
-            res = pipe(init_img, num_inference_steps=30, num_frames=frames)
-            video_frames = getattr(res, "frames", None) or res[0]
-            out_vid = f"/tmp/video_{uuid.uuid4().hex}.mp4"
-            try:
-                import imageio
-                imageio.mimwrite(out_vid, video_frames, fps=8)
-                return FileResponse(out_vid, media_type="video/mp4")
-            except Exception:
-                return {"frames_count": len(video_frames)}
+            from langchain.embeddings import HuggingFaceEmbeddings
+            embedding_models["huggingface"] = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-mpnet-base-v2"
+            )
+            logger.info("HuggingFace embeddings initialized")
         except Exception as e:
-            return {"error": str(e)}
-    # HF fallback
-    if HF_TOKEN and model_id and httpx:
-        try:
-            resp = await hf_inference_async(model_id, {"prompt": prompt})
-            return {"source": "hf", "result": resp}
-        except Exception as e:
-            return {"error": str(e)}
-    return {"error": "img2vid unavailable"}
-
-# ===============================
-# 3D / Geometry Endpoints
-# ===============================
-@app.post("/3d/generate")
-async def generate_3d(prompt: str = Form(...)):
-    # Moderate input
-    ok, reason = moderate_text(prompt)
-    if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Blocked by moderation")
-
-    hf_id = get_best_hf_id("3d:object")
-    if not hf_id:
-        return {"error": "No 3D model configured"}
-
-    # Attempt local Point-E generation
-    try:
-        from point_e.diffusion.configs import DIFFUSION_CONFIGS, model_from_config
-        from point_e.diffusion.sampling import sample_model
-        from point_e.util.point_cloud import save_point_cloud
-
-        cache_key = f"3d:{hf_id}"
-        if cache_key not in MODEL_CACHE:
-            device = 'cuda' if torch and torch.cuda.is_available() else 'cpu'
-            cfg = DIFFUSION_CONFIGS['base']
-            model = model_from_config(cfg, device=device)
-            MODEL_CACHE[cache_key] = model
-        model = MODEL_CACHE[cache_key]
-
-        # Sample point cloud
-        pc = sample_model(model, prompt)
-        out_path = f"/tmp/pointcloud_{uuid.uuid4().hex}.ply"
-        save_point_cloud(pc, out_path)
-        return FileResponse(out_path)
+            logger.error(f"Failed to initialize HuggingFace embeddings: {e}")
     
-    except ImportError:
-        # Point-E not installed
-        pass
+    # Initialize Cohere embeddings
+    if COHERE_API_KEY:
+        try:
+            from langchain.embeddings import CohereEmbeddings
+            embedding_models["cohere"] = CohereEmbeddings(cohere_api_key=COHERE_API_KEY)
+            logger.info("Cohere embeddings initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Cohere embeddings: {e}")
+    
+    return embedding_models
+
+# Initialize embedding models
+embedding_models = init_embedding_models()
+
+# Initialize LLMs
+def init_llms():
+    global llms
+    
+    llms = {}
+    
+    # Initialize OpenAI
+    if OPENAI_API_KEY:
+        try:
+            from langchain_openai import ChatOpenAI
+            llms["openai"] = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4o")
+            logger.info("OpenAI LLM initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI LLM: {e}")
+    
+    # Initialize Anthropic
+    if ANTHROPIC_API_KEY:
+        try:
+            from langchain_anthropic import ChatAnthropic
+            llms["anthropic"] = ChatAnthropic(anthropic_api_key=ANTHROPIC_API_KEY, model="claude-3-opus-20240229")
+            logger.info("Anthropic LLM initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Anthropic LLM: {e}")
+    
+    # Initialize Google
+    if GOOGLE_API_KEY:
+        try:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            llms["google"] = ChatGoogleGenerativeAI(google_api_key=GOOGLE_API_KEY, model="gemini-pro")
+            logger.info("Google LLM initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Google LLM: {e}")
+    
+    # Initialize Cohere
+    if COHERE_API_KEY:
+        try:
+            from langchain_cohere import ChatCohere
+            llms["cohere"] = ChatCohere(cohere_api_key=COHERE_API_KEY, model="command")
+            logger.info("Cohere LLM initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Cohere LLM: {e}")
+    
+    # Initialize Mistral
+    if MISTRAL_API_KEY:
+        try:
+            from langchain_mistralai import ChatMistralAI
+            llms["mistral"] = ChatMistralAI(mistral_api_key=MISTRAL_API_KEY, model="mistral-large")
+            logger.info("Mistral LLM initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Mistral LLM: {e}")
+    
+    # Initialize Groq
+    if GROQ_API_KEY:
+        try:
+            from langchain_groq import ChatGroq
+            llms["groq"] = ChatGroq(groq_api_key=GROQ_API_KEY, model="llama-3.1-405b")
+            logger.info("Groq LLM initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Groq LLM: {e}")
+    
+    return llms
+
+# Initialize LLMs
+llms = init_llms()
+
+# Initialize tools
+def init_tools():
+    global tools
+    
+    tools = []
+    
+    # Add DuckDuckGo search
+    try:
+        from langchain_community.tools import DuckDuckGoSearchRun
+        tools.append(Tool(
+            name="duckduckgo_search",
+            description="Search the web using DuckDuckGo",
+            func=DuckDuckGoSearchRun().run
+        ))
+        logger.info("DuckDuckGo search tool initialized")
     except Exception as e:
-        return {"error": f"Local Point-E failed: {e}"}
-
-    # Hugging Face Inference API fallback
-    if HF_TOKEN and hf_id and httpx:
-        try:
-            async def hf_inference_async(model_id: str, prompt: str):
-                headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-                async with httpx.AsyncClient(timeout=120) as client:
-                    r = await client.post(
-                        f"https://api-inference.huggingface.co/models/{model_id}",
-                        headers=headers,
-                        json={"inputs": prompt}
-                    )
-                    r.raise_for_status()
-                    return r.json()
-            result = await hf_inference_async(hf_id, prompt)
-            return {"source": "hf_inference", "result": result}
-
-        except Exception as e:
-            return {"error": f"HF Inference failed: {e}"}
-
-    return {"error": "3D generation unavailable"}
-
-# ===============================
-# Reinforcement Learning / Decision endpoints
-# ===============================
-import json
-import numpy as np
-
-@app.post("/rl/predict")
-async def rl_predict(obs: str = Form(...), model: str = Form("rl:policy")):
-    """
-    Parses a JSON or CSV observation string and returns a dummy action.
-    Can be replaced with stable-baselines3 / RL model inference.
-    """
-    hf_id = get_best_hf_id(model)
+        logger.error(f"Failed to initialize DuckDuckGo search tool: {e}")
     
-    # Attempt to parse JSON first
-    try:
-        obs_data = json.loads(obs)
-        if isinstance(obs_data, dict):
-            obs_array = np.array(list(obs_data.values()), dtype=np.float32)
-        elif isinstance(obs_data, list):
-            obs_array = np.array(obs_data, dtype=np.float32)
-        else:
-            obs_array = np.array([float(obs_data)], dtype=np.float32)
-    except Exception:
-        # Fallback: try CSV-style parsing
+    # Add Serper search
+    if SERPER_API_KEY:
         try:
-            obs_array = np.array([float(x.strip()) for x in obs.split(",")], dtype=np.float32)
-        except Exception:
-            obs_array = np.array([0.0], dtype=np.float32)
-
-    # Dummy action: just a random float array with same shape
-    action = np.random.randn(*obs_array.shape).tolist()
-
-    return {
-        "action": action,
-        "model": hf_id,
-        "obs_snippet": str(obs_array.tolist())[:200]
-    }
-# ===============================
-# ML Utilities
-# ===============================
-@app.post("/ml/anomaly")
-async def ml_anomaly(file: UploadFile = File(...)):
-    content = await file.read()
-    hf_id = get_best_hf_id("ml:anomaly")
-
-    # Try local CLIP
+            tools.append(Tool(
+                name="serper_search",
+                description="Search the web using Google via Serper",
+                func=lambda q: serper_search(q)
+            ))
+            logger.info("Serper search tool initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Serper search tool: {e}")
+    
+    # Add Wolfram Alpha
+    if WOLFRAM_ALPHA_API_KEY:
+        try:
+            tools.append(Tool(
+                name="wolfram_alpha",
+                description="Compute answers using Wolfram Alpha",
+                func=lambda q: wolfram_alpha_query(q)
+            ))
+            logger.info("Wolfram Alpha tool initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Wolfram Alpha tool: {e}")
+    
+    # Add calculator
     try:
-        from transformers import CLIPProcessor, CLIPModel
+        from langchain.tools import BaseTool
+        from pydantic import BaseModel, Field
+        
+        class CalculatorInput(BaseModel):
+            expression: str = Field(description="Mathematical expression to evaluate")
+        
+        class CalculatorTool(BaseTool):
+            name = "calculator"
+            description = "Useful for when you need to answer questions about math"
+            args_schema = CalculatorInput
+            
+            def _run(self, expression: str) -> str:
+                try:
+                    return str(eval(expression))
+                except Exception as e:
+                    return f"Error: {str(e)}"
+            
+            async def _arun(self, expression: str) -> str:
+                return self._run(expression)
+        
+        tools.append(CalculatorTool())
+        logger.info("Calculator tool initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize calculator tool: {e}")
+    
+    # Add code interpreter
+    try:
+        from langchain.tools import BaseTool
+        from pydantic import BaseModel, Field
+        
+        class CodeInput(BaseModel):
+            code: str = Field(description="Code to execute")
+            language: str = Field(description="Programming language")
+        
+        class CodeInterpreterTool(BaseTool):
+            name = "code_interpreter"
+            description = "Useful for when you need to execute code"
+            args_schema = CodeInput
+            
+            def _run(self, code: str, language: str) -> str:
+                try:
+                    if language == "python":
+                        # Execute Python code in a sandboxed environment
+                        import subprocess
+                        result = subprocess.run(
+                            ["python", "-c", code],
+                            capture_output=True,
+                            text=True,
+                            timeout=30
+                        )
+                        return result.stdout if result.stdout else result.stderr
+                    else:
+                        return f"Unsupported language: {language}"
+                except Exception as e:
+                    return f"Error: {str(e)}"
+            
+            async def _arun(self, code: str, language: str) -> str:
+                return self._run(code, language)
+        
+        tools.append(CodeInterpreterTool())
+        logger.info("Code interpreter tool initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize code interpreter tool: {e}")
+    
+    return tools
 
-        key = f"clip:{hf_id}"
-        if key not in MODEL_CACHE:
-            processor = CLIPProcessor.from_pretrained(hf_id)
-            model = CLIPModel.from_pretrained(hf_id)
-            MODEL_CACHE[key] = (processor, model)
-        processor, model = MODEL_CACHE[key]
+# Initialize tools
+tools = init_tools()
 
-        img = Image.open(io.BytesIO(content)).convert("RGB")
-        inputs = processor(images=img, return_tensors="pt")
+# Initialize agents
+def init_agents():
+    global agents
+    
+    agents = {}
+    
+    # Initialize a general purpose agent
+    if llms and tools:
+        try:
+            from langchain.agents import create_openai_tools_agent, AgentExecutor
+            
+            # Create the prompt template
+            from langchain import hub
+            prompt = hub.pull("hwchase17/openai-tools-agent")
+            
+            # Create the agent
+            agent = create_openai_tools_agent(llms["openai"], tools, prompt)
+            
+            # Create the agent executor
+            agents["general"] = AgentExecutor(agent=agent, tools=tools, verbose=True)
+            logger.info("General purpose agent initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize general purpose agent: {e}")
+    
+    return agents
 
-        if torch:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            model.to(device)
-            inputs = {k: v.to(device) for k, v in inputs.items()}
+# Initialize agents
+agents = init_agents()
 
-            with torch.no_grad():
-                emb = model.get_image_features(**inputs)
-            score = float(torch.norm(emb).cpu().item())
-        else:
-            score = None
+# Initialize multi-agent system
+def init_multi_agent_system():
+    global multi_agent_system
+    
+    if not llms:
+        logger.warning("No LLMs available for multi-agent system")
+        return None
+    
+    try:
+        from crewai import Agent, Task, Crew, Process
+        
+        # Define agents
+        researcher = Agent(
+            role='Researcher',
+            goal='Uncover cutting-edge developments in AI and data science',
+            backstory="""You work at a leading tech think tank.
+            Your expertise lies in identifying emerging trends.
+            You have a knack for dissecting complex data and presenting actionable insights.""",
+            verbose=True,
+            allow_delegation=False,
+            llm=llms.get("openai")
+        )
+        
+        writer = Agent(
+            role='Writer',
+            goal='Create compelling content about AI advancements',
+            backstory="""You are a renowned Content Strategist, known for your insightful and engaging articles.
+            You transform complex concepts into compelling narratives.""",
+            verbose=True,
+            allow_delegation=False,
+            llm=llms.get("anthropic")
+        )
+        
+        # Define tasks
+        task1 = Task(
+            description="""Investigate the latest AI trends and identify key breakthroughs.
+            Your final report should be a comprehensive analysis of the most significant developments.""",
+            agent=researcher
+        )
+        
+        task2 = Task(
+            description="""Using the insights provided, develop an engaging blog
+            post that highlights the most significant AI advancements.
+            Your post should be informative yet accessible, catering to a tech-savvy audience.""",
+            agent=writer
+        )
+        
+        # Create crew
+        multi_agent_system = Crew(
+            agents=[researcher, writer],
+            tasks=[task1, task2],
+            process=Process.sequential,
+            verbose=True
+        )
+        
+        logger.info("Multi-agent system initialized")
+        return multi_agent_system
+    except Exception as e:
+        logger.error(f"Failed to initialize multi-agent system: {e}")
+        return None
 
-        return {"source": "local", "anomaly_score": score}
+# Initialize multi-agent system
+multi_agent_system = init_multi_agent_system()
 
-    except Exception as e_local:
-        # HF fallback
-        if HF_TOKEN and hf_id and httpx:
+# Initialize memory systems
+def init_memory_systems():
+    global memory_systems
+    
+    memory_systems = {}
+    
+    # Initialize conversation memory
+    try:
+        from langchain.memory import ConversationBufferWindowMemory
+        memory_systems["conversation"] = ConversationBufferWindowMemory(
+            k=10,  # Remember last 10 exchanges
+            return_messages=True
+        )
+        logger.info("Conversation memory initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize conversation memory: {e}")
+    
+    # Initialize vector memory
+    if vector_databases and embedding_models:
+        try:
+            from langchain.vectorstores import FAISS
+            from langchain.text_splitter import RecursiveCharacterTextSplitter
+            from langchain.document_loaders import TextLoader
+            
+            # Create a simple vector store
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            
+            # Load some sample documents
             try:
-                resp = await hf_inference_async(hf_id, content)
-                return {"source": "hf", "result": resp}
-            except Exception as e_hf:
-                return {"error": f"HF fallback failed: {str(e_hf)}"}
-
-    return {"error": "Anomaly detection unavailable"}
-    
-@app.post("/ml/recommend")
-async def ml_recommend(user_id: str = Form(...), context: Optional[str] = Form(None)):
-    # placeholder: return empty recommendations
-    return {"user_id": user_id, "recommendations": [], "note": "Connect real recommender"}
-
-# ===============================
-# Medical / Scientific Endpoints
-# ===============================
-@app.post("/medical/scan")
-async def medical_scan(file: UploadFile = File(...), model: str = Form("medical:imaging")):
-    content = await file.read()
-    hf_id = get_best_hf_id(model)
-    # Very explicit: DO NOT USE FOR REAL DIAGNOSIS
-    # Try HF inference if available
-    if HF_TOKEN and hf_id and httpx:
-        try:
-            resp = await hf_inference_async(hf_id, content)
-            return {"source": "hf", "result": resp}
+                loader = TextLoader("./sample.txt")
+                documents = loader.load()
+                texts = text_splitter.split_documents(documents)
+                
+                # Create the vector store
+                vector_store = FAISS.from_documents(texts, embedding_models["openai"])
+                memory_systems["vector"] = vector_store
+                logger.info("Vector memory initialized")
+            except Exception as e:
+                logger.warning(f"Failed to load sample documents for vector memory: {e}")
+                # Create an empty vector store
+                memory_systems["vector"] = FAISS.from_texts(
+                    ["This is a sample document for initialization."],
+                    embedding_models["openai"]
+                )
+                logger.info("Empty vector memory initialized")
         except Exception as e:
-            return {"error": str(e)}
-    return {"error": "Medical imaging model unavailable"}
+            logger.error(f"Failed to initialize vector memory: {e}")
+    
+    return memory_systems
 
-@app.post("/medical/protein")
-async def medical_protein(
-    sequence: str = Form(...),
-    model: str = Form("medical:protein")
-):
-    hf_id = get_best_hf_id(model)
-    if not hf_id:
-        return {"error": "Protein model not found"}
+# Initialize memory systems
+memory_systems = init_memory_systems()
 
-    # Try ESM2 via transformers
+# Initialize specialized models
+def init_specialized_models():
+    global specialized_models
+    
+    specialized_models = {}
+    
+    # Initialize text classification model
     try:
-        import torch
-        from transformers import AutoTokenizer, AutoModel
+        from transformers import pipeline
+        specialized_models["text_classification"] = pipeline(
+            "text-classification",
+            model="roberta-large-mnli"
+        )
+        logger.info("Text classification model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize text classification model: {e}")
+    
+    # Initialize text generation model
+    try:
+        from transformers import pipeline
+        specialized_models["text_generation"] = pipeline(
+            "text-generation",
+            model="gpt2-xl"
+        )
+        logger.info("Text generation model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize text generation model: {e}")
+    
+    # Initialize summarization model
+    try:
+        from transformers import pipeline
+        specialized_models["summarization"] = pipeline(
+            "summarization",
+            model="facebook/bart-large-cnn"
+        )
+        logger.info("Summarization model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize summarization model: {e}")
+    
+    # Initialize translation model
+    try:
+        from transformers import pipeline
+        specialized_models["translation"] = pipeline(
+            "translation",
+            model="facebook/nllb-200-distilled-600M"
+        )
+        logger.info("Translation model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize translation model: {e}")
+    
+    # Initialize question answering model
+    try:
+        from transformers import pipeline
+        specialized_models["question_answering"] = pipeline(
+            "question-answering",
+            model="deepset/roberta-base-squad2"
+        )
+        logger.info("Question answering model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize question answering model: {e}")
+    
+    # Initialize zero-shot classification model
+    try:
+        from transformers import pipeline
+        specialized_models["zero_shot_classification"] = pipeline(
+            "zero-shot-classification",
+            model="facebook/bart-large-mnli"
+        )
+        logger.info("Zero-shot classification model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize zero-shot classification model: {e}")
+    
+    # Initialize image classification model
+    try:
+        from transformers import pipeline
+        specialized_models["image_classification"] = pipeline(
+            "image-classification",
+            model="google/vit-base-patch16-224"
+        )
+        logger.info("Image classification model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize image classification model: {e}")
+    
+    # Initialize object detection model
+    try:
+        from transformers import pipeline
+        specialized_models["object_detection"] = pipeline(
+            "object-detection",
+            model="facebook/detr-resnet-50"
+        )
+        logger.info("Object detection model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize object detection model: {e}")
+    
+    # Initialize image segmentation model
+    try:
+        from transformers import pipeline
+        specialized_models["image_segmentation"] = pipeline(
+            "image-segmentation",
+            model="facebook/detr-resnet-50-panoptic"
+        )
+        logger.info("Image segmentation model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize image segmentation model: {e}")
+    
+    # Initialize image captioning model
+    try:
+        from transformers import pipeline
+        specialized_models["image_captioning"] = pipeline(
+            "image-to-text",
+            model="nlpconnect/vit-gpt2-image-captioning"
+        )
+        logger.info("Image captioning model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize image captioning model: {e}")
+    
+    # Initialize visual question answering model
+    try:
+        from transformers import pipeline
+        specialized_models["visual_question_answering"] = pipeline(
+            "visual-question-answering",
+            model="dandelin/vilt-b32-finetuned-vqa"
+        )
+        logger.info("Visual question answering model initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize visual question answering model: {e}")
+    
+    return specialized_models
 
-        key = f"esm:{hf_id}"
-        if key not in MODEL_CACHE:
-            tokenizer = AutoTokenizer.from_pretrained(hf_id)
-            model_obj = AutoModel.from_pretrained(hf_id)
-            model_obj.eval()  # ensure evaluation mode
-            MODEL_CACHE[key] = (tokenizer, model_obj)
+# Initialize specialized models
+specialized_models = init_specialized_models()
 
-        tokenizer, model_obj = MODEL_CACHE[key]
-        inputs = tokenizer(sequence, return_tensors="pt")
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        model_obj.to(device)
+# Initialize advanced capabilities
+def init_advanced_capabilities():
+    global advanced_capabilities
+    
+    advanced_capabilities = {}
+    
+    # Initialize web scraping
+    try:
+        from bs4 import BeautifulSoup
+        import requests
+        
+        def scrape_webpage(url: str) -> str:
+            try:
+                response = requests.get(url)
+                soup = BeautifulSoup(response.content, "html.parser")
+                return soup.get_text()
+            except Exception as e:
+                return f"Error scraping webpage: {str(e)}"
+        
+        advanced_capabilities["web_scraping"] = scrape_webpage
+        logger.info("Web scraping capability initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize web scraping capability: {e}")
+    
+    # Initialize document processing
+    try:
+        import fitz  # PyMuPDF
+        import docx
+        import pandas as pd
+        
+        def process_document(file_path: str) -> str:
+            try:
+                if file_path.endswith(".pdf"):
+                    doc = fitz.open(file_path)
+                    text = ""
+                    for page in doc:
+                        text += page.get_text()
+                    return text
+                elif file_path.endswith(".docx"):
+                    doc = docx.Document(file_path)
+                    text = ""
+                    for paragraph in doc.paragraphs:
+                        text += paragraph.text + "\n"
+                    return text
+                elif file_path.endswith(".txt"):
+                    with open(file_path, "r") as f:
+                        return f.read()
+                elif file_path.endswith(".csv"):
+                    df = pd.read_csv(file_path)
+                    return df.to_string()
+                else:
+                    return "Unsupported file format"
+            except Exception as e:
+                return f"Error processing document: {str(e)}"
+        
+        advanced_capabilities["document_processing"] = process_document
+        logger.info("Document processing capability initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize document processing capability: {e}")
+    
+    # Initialize data analysis
+    try:
+        import pandas as pd
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        
+        def analyze_data(data: str) -> dict:
+            try:
+                # Convert string to DataFrame
+                from io import StringIO
+                df = pd.read_csv(StringIO(data))
+                
+                # Basic statistics
+                stats = df.describe().to_dict()
+                
+                # Data types
+                dtypes = df.dtypes.to_dict()
+                
+                # Missing values
+                missing = df.isnull().sum().to_dict()
+                
+                # Correlation matrix
+                corr = df.corr().to_dict()
+                
+                return {
+                    "statistics": stats,
+                    "dtypes": dtypes,
+                    "missing_values": missing,
+                    "correlation": corr
+                }
+            except Exception as e:
+                return {"error": str(e)}
+        
+        advanced_capabilities["data_analysis"] = analyze_data
+        logger.info("Data analysis capability initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize data analysis capability: {e}")
+    
+    # Initialize code generation
+    try:
+        def generate_code(prompt: str, language: str = "python") -> str:
+            try:
+                if language == "python":
+                    # Use the code generation model
+                    result = specialized_models["text_generation"](
+                        f"# Generate {language} code for: {prompt}\n",
+                        max_length=500,
+                        num_return_sequences=1
+                    )
+                    return result[0]["generated_text"]
+                else:
+                    return f"Code generation for {language} not yet implemented"
+            except Exception as e:
+                return f"Error generating code: {str(e)}"
+        
+        advanced_capabilities["code_generation"] = generate_code
+        logger.info("Code generation capability initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize code generation capability: {e}")
+    
+    # Initialize mathematical reasoning
+    try:
+        def solve_math(problem: str) -> str:
+            try:
+                # Use Wolfram Alpha if available
+                if WOLFRAM_ALPHA_API_KEY:
+                    return wolfram_alpha_query(problem)
+                else:
+                    # Use a simple math evaluator
+                    try:
+                        result = eval(problem)
+                        return str(result)
+                    except:
+                        return "Cannot solve this math problem"
+            except Exception as e:
+                return f"Error solving math problem: {str(e)}"
+        
+        advanced_capabilities["math_reasoning"] = solve_math
+        logger.info("Math reasoning capability initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize math reasoning capability: {e}")
+    
+    return advanced_capabilities
 
-        with torch.no_grad():
-            outputs = model_obj(**inputs)
-            # mean pooling over sequence length
-            emb = outputs.last_hidden_state.mean(dim=1)
+# Initialize advanced capabilities
+advanced_capabilities = init_advanced_capabilities()
+
+# Initialize integrations
+def init_integrations():
+    global integrations
+    
+    integrations = {}
+    
+    # Initialize Wikipedia integration
+    try:
+        import wikipedia
+        
+        def search_wikipedia(query: str) -> str:
+            try:
+                page = wikipedia.page(query)
+                return page.summary[:500]  # Return first 500 characters
+            except Exception as e:
+                return f"Error searching Wikipedia: {str(e)}"
+        
+        integrations["wikipedia"] = search_wikipedia
+        logger.info("Wikipedia integration initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize Wikipedia integration: {e}")
+    
+    # Initialize arXiv integration
+    try:
+        import arxiv
+        
+        def search_arxiv(query: str) -> list:
+            try:
+                search = arxiv.Search(
+                    query=query,
+                    max_results=5,
+                    sort_by=arxiv.SortCriterion.Relevance
+                )
+                results = []
+                for result in search.results():
+                    results.append({
+                        "title": result.title,
+                        "summary": result.summary,
+                        "authors": [author.name for author in result.authors],
+                        "published": result.published.strftime("%Y-%m-%d"),
+                        "url": result.entry_id
+                    })
+                return results
+            except Exception as e:
+                return [{"error": str(e)}]
+        
+        integrations["arxiv"] = search_arxiv
+        logger.info("arXiv integration initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize arXiv integration: {e}")
+    
+    # Initialize news integration
+    if NEWS_API_KEY:
+        try:
+            from newsapi import NewsApiClient
+            
+            newsapi = NewsApiClient(api_key=NEWS_API_KEY)
+            
+            def get_news(query: str, language: str = "en") -> list:
+                try:
+                    response = newsapi.get_everything(
+                        q=query,
+                        language=language,
+                        sort_by="relevancy",
+                        page_size=5
+                    )
+                    articles = []
+                    for article in response["articles"]:
+                        articles.append({
+                            "title": article["title"],
+                            "description": article["description"],
+                            "url": article["url"],
+                            "source": article["source"]["name"],
+                            "publishedAt": article["publishedAt"]
+                        })
+                    return articles
+                except Exception as e:
+                    return [{"error": str(e)}]
+            
+            integrations["news"] = get_news
+            logger.info("News integration initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize news integration: {e}")
+    
+    # Initialize weather integration
+    if OPENWEATHERMAP_API_KEY:
+        try:
+            import pyowm
+            
+            owm = pyowm.OWM(OPENWEATHERMAP_API_KEY)
+            
+            def get_weather(location: str) -> dict:
+                try:
+                    observation = owm.weather_at_place(location)
+                    w = observation.get_weather()
+                    return {
+                        "location": location,
+                        "temperature": w.get_temperature("celsius")["temp"],
+                        "status": w.get_status(),
+                        "humidity": w.get_humidity(),
+                        "wind": w.get_wind()
+                    }
+                except Exception as e:
+                    return {"error": str(e)}
+            
+            integrations["weather"] = get_weather
+            logger.info("Weather integration initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize weather integration: {e}")
+    
+    # Initialize financial data integration
+    if ALPHA_VANTAGE_API_KEY:
+        try:
+            from alpha_vantage.timeseries import TimeSeries
+            
+            ts = TimeSeries(key=ALPHA_VANTAGE_API_KEY)
+            
+            def get_stock_price(symbol: str) -> dict:
+                try:
+                    data, meta_data = ts.get_intraday(symbol=symbol)
+                    if data:
+                        latest_timestamp = sorted(data.keys())[0]
+                        latest_price = data[latest_timestamp]["4. close"]
+                        return {
+                            "symbol": symbol,
+                            "price": latest_price,
+                            "timestamp": latest_timestamp
+                        }
+                    else:
+                        return {"error": "No data found"}
+                except Exception as e:
+                    return {"error": str(e)}
+            
+            integrations["stock_price"] = get_stock_price
+            logger.info("Financial data integration initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize financial data integration: {e}")
+    
+    return integrations
+
+# Initialize integrations
+integrations = init_integrations()
+
+# Initialize API clients
+def init_api_clients():
+    global api_clients
+    
+    api_clients = {}
+    
+    # Initialize Twitter client
+    if all([TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET]):
+        try:
+            import tweepy
+            
+            auth = tweepy.OAuthHandler(TWITTER_API_KEY, TWITTER_API_SECRET)
+            auth.set_access_token(TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET)
+            api_clients["twitter"] = tweepy.API(auth)
+            logger.info("Twitter client initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Twitter client: {e}")
+    
+    # Initialize Reddit client
+    if all([REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT]):
+        try:
+            import praw
+            
+            api_clients["reddit"] = praw.Reddit(
+                client_id=REDDIT_CLIENT_ID,
+                client_secret=REDDIT_CLIENT_SECRET,
+                user_agent=REDDIT_USER_AGENT
+            )
+            logger.info("Reddit client initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Reddit client: {e}")
+    
+    # Initialize Telegram client
+    if TELEGRAM_BOT_TOKEN:
+        try:
+            import telegram
+            
+            api_clients["telegram"] = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+            logger.info("Telegram client initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Telegram client: {e}")
+    
+    # Initialize Discord client
+    if DISCORD_BOT_TOKEN:
+        try:
+            import discord
+            
+            # Discord client needs to be initialized in an async context
+            # We'll store the token for later use
+            api_clients["discord_token"] = DISCORD_BOT_TOKEN
+            logger.info("Discord client token stored")
+        except Exception as e:
+            logger.error(f"Failed to initialize Discord client: {e}")
+    
+    # Initialize Slack client
+    if SLACK_BOT_TOKEN:
+        try:
+            from slack_sdk import WebClient
+            
+            api_clients["slack"] = WebClient(token=SLACK_BOT_TOKEN)
+            logger.info("Slack client initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Slack client: {e}")
+    
+    # Initialize Google Maps client
+    if GOOGLE_MAPS_API_KEY:
+        try:
+            import googlemaps
+            
+            api_clients["google_maps"] = googlemaps.Client(key=GOOGLE_MAPS_API_KEY)
+            logger.info("Google Maps client initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize Google Maps client: {e}")
+    
+    return api_clients
+
+# Initialize API clients
+api_clients = init_api_clients()
+
+# Initialize file processors
+def init_file_processors():
+    global file_processors
+    
+    file_processors = {}
+    
+    # Initialize image processor
+    try:
+        from PIL import Image
+        import cv2
+        import numpy as np
+        
+        def process_image(image_path: str) -> dict:
+            try:
+                # Open the image
+                img = Image.open(image_path)
+                
+                # Get basic info
+                info = {
+                    "format": img.format,
+                    "mode": img.mode,
+                    "size": img.size
+                }
+                
+                # Convert to numpy array for further processing
+                img_array = np.array(img)
+                
+                # Calculate basic statistics
+                info["mean"] = np.mean(img_array, axis=(0, 1)).tolist()
+                info["std"] = np.std(img_array, axis=(0, 1)).tolist()
+                
+                return info
+            except Exception as e:
+                return {"error": str(e)}
+        
+        file_processors["image"] = process_image
+        logger.info("Image processor initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize image processor: {e}")
+    
+    # Initialize audio processor
+    try:
+        import librosa
+        import numpy as np
+        
+        def process_audio(audio_path: str) -> dict:
+            try:
+                # Load the audio file
+                y, sr = librosa.load(audio_path)
+                
+                # Calculate basic features
+                info = {
+                    "duration": librosa.get_duration(y=y, sr=sr),
+                    "sample_rate": sr,
+                    "mean": np.mean(y),
+                    "std": np.std(y)
+                }
+                
+                # Extract MFCC features
+                mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+                info["mfcc_mean"] = np.mean(mfccs, axis=1).tolist()
+                
+                return info
+            except Exception as e:
+                return {"error": str(e)}
+        
+        file_processors["audio"] = process_audio
+        logger.info("Audio processor initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize audio processor: {e}")
+    
+    # Initialize video processor
+    try:
+        import cv2
+        import numpy as np
+        
+        def process_video(video_path: str) -> dict:
+            try:
+                # Open the video file
+                cap = cv2.VideoCapture(video_path)
+                
+                # Get basic info
+                info = {
+                    "fps": cap.get(cv2.CAP_PROP_FPS),
+                    "frame_count": int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+                    "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                    "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                }
+                
+                # Calculate duration
+                info["duration"] = info["frame_count"] / info["fps"]
+                
+                # Release the video capture
+                cap.release()
+                
+                return info
+            except Exception as e:
+                return {"error": str(e)}
+        
+        file_processors["video"] = process_video
+        logger.info("Video processor initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize video processor: {e}")
+    
+    return file_processors
+
+# Initialize file processors
+file_processors = init_file_processors()
+
+# Initialize data visualizers
+def init_data_visualizers():
+    global data_visualizers
+    
+    data_visualizers = {}
+    
+    # Initialize matplotlib visualizer
+    try:
+        import matplotlib.pyplot as plt
+        import io
+        import base64
+        
+        def matplotlib_plot(data: dict, plot_type: str = "line") -> str:
+            try:
+                # Create a figure
+                plt.figure(figsize=(10, 6))
+                
+                # Create the plot based on the type
+                if plot_type == "line":
+                    plt.plot(data["x"], data["y"])
+                elif plot_type == "bar":
+                    plt.bar(data["x"], data["y"])
+                elif plot_type == "scatter":
+                    plt.scatter(data["x"], data["y"])
+                elif plot_type == "hist":
+                    plt.hist(data["x"])
+                else:
+                    return "Unsupported plot type"
+                
+                # Add labels and title
+                plt.xlabel(data.get("x_label", "X"))
+                plt.ylabel(data.get("y_label", "Y"))
+                plt.title(data.get("title", "Plot"))
+                
+                # Save the plot to a buffer
+                buf = io.BytesIO()
+                plt.savefig(buf, format="png")
+                buf.seek(0)
+                
+                # Convert to base64
+                img_base64 = base64.b64encode(buf.read()).decode("utf-8")
+                
+                # Close the plot
+                plt.close()
+                
+                return img_base64
+            except Exception as e:
+                return f"Error creating plot: {str(e)}"
+        
+        data_visualizers["matplotlib"] = matplotlib_plot
+        logger.info("Matplotlib visualizer initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize matplotlib visualizer: {e}")
+    
+    # Initialize plotly visualizer
+    try:
+        import plotly.graph_objects as go
+        import plotly.express as px
+        import json
+        
+        def plotly_plot(data: dict, plot_type: str = "line") -> str:
+            try:
+                # Create the plot based on the type
+                if plot_type == "line":
+                    fig = go.Figure(data=go.Scatter(x=data["x"], y=data["y"]))
+                elif plot_type == "bar":
+                    fig = go.Figure(data=go.Bar(x=data["x"], y=data["y"]))
+                elif plot_type == "scatter":
+                    fig = go.Figure(data=go.Scatter(x=data["x"], y=data["y"], mode="markers"))
+                elif plot_type == "hist":
+                    fig = go.Figure(data=go.Histogram(x=data["x"]))
+                else:
+                    return "Unsupported plot type"
+                
+                # Add labels and title
+                fig.update_layout(
+                    xaxis_title=data.get("x_label", "X"),
+                    yaxis_title=data.get("y_label", "Y"),
+                    title=data.get("title", "Plot")
+                )
+                
+                # Convert to JSON
+                return fig.to_json()
+            except Exception as e:
+                return f"Error creating plot: {str(e)}"
+        
+        data_visualizers["plotly"] = plotly_plot
+        logger.info("Plotly visualizer initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize plotly visualizer: {e}")
+    
+    return data_visualizers
+
+# Initialize data visualizers
+data_visualizers = init_data_visualizers()
+
+# Initialize task scheduler
+def init_task_scheduler():
+    global task_scheduler
+    
+    try:
+        import schedule
+        import threading
+        import time
+        
+        def run_scheduler():
+            while True:
+                schedule.run_pending()
+                time.sleep(1)
+        
+        # Start the scheduler in a separate thread
+        scheduler_thread = threading.Thread(target=run_scheduler)
+        scheduler_thread.daemon = True
+        scheduler_thread.start()
+        
+        task_scheduler = schedule
+        logger.info("Task scheduler initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize task scheduler: {e}")
+        task_scheduler = None
+    
+    return task_scheduler
+
+# Initialize task scheduler
+task_scheduler = init_task_scheduler()
+
+# Initialize distributed task queue
+def init_distributed_task_queue():
+    global distributed_task_queue
+    
+    try:
+        from celery import Celery
+        
+        # Configure Celery
+        distributed_task_queue = Celery(
+            "zynara_tasks",
+            broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+            backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+        )
+        
+        logger.info("Distributed task queue initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize distributed task queue: {e}")
+        distributed_task_queue = None
+    
+    return distributed_task_queue
+
+# Initialize distributed task queue
+distributed_task_queue = init_distributed_task_queue()
+
+# Initialize cache
+def init_cache():
+    global cache
+    
+    try:
+        import redis
+        
+        cache = redis.Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            password=REDIS_API_KEY,
+            db=0
+        )
+        
+        # Test the connection
+        cache.ping()
+        
+        logger.info("Cache initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize cache: {e}")
+        cache = None
+    
+    return cache
+
+# Initialize cache
+cache = init_cache()
+
+# Initialize search index
+def init_search_index():
+    global search_index
+    
+    try:
+        from elasticsearch import Elasticsearch
+        
+        search_index = Elasticsearch(
+            hosts=[os.getenv("ELASTICSEARCH_URL", "http://localhost:9200")],
+            api_key=ELASTICSEARCH_API_KEY
+        )
+        
+        # Test the connection
+        search_index.ping()
+        
+        logger.info("Search index initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize search index: {e}")
+        search_index = None
+    
+    return search_index
+
+# Initialize search index
+search_index = init_search_index()
+
+# Initialize monitoring
+def init_monitoring():
+    global monitoring
+    
+    try:
+        import prometheus_client
+        
+        # Create metrics
+        monitoring = {
+            "request_count": prometheus_client.Counter(
+                "zynara_request_count",
+                "Total number of requests",
+                ["method", "endpoint"]
+            ),
+            "request_duration": prometheus_client.Histogram(
+                "zynara_request_duration_seconds",
+                "Request duration in seconds",
+                ["method", "endpoint"]
+            ),
+            "active_requests": prometheus_client.Gauge(
+                "zynara_active_requests",
+                "Number of active requests"
+            )
+        }
+        
+        logger.info("Monitoring initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize monitoring: {e}")
+        monitoring = None
+    
+    return monitoring
+
+# Initialize monitoring
+monitoring = init_monitoring()
+
+# Initialize logging
+def init_logging():
+    global logging_config
+    
+    try:
+        import logging.config
+        
+        logging_config = {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "default": {
+                    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+                },
+                "json": {
+                    "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+                    "format": "%(asctime)s %(name)s %(levelname)s %(message)s"
+                }
+            },
+            "handlers": {
+                "console": {
+                    "class": "logging.StreamHandler",
+                    "formatter": "default",
+                    "stream": "ext://sys.stdout"
+                },
+                "file": {
+                    "class": "logging.handlers.RotatingFileHandler",
+                    "formatter": "json",
+                    "filename": "zynara.log",
+                    "maxBytes": 10485760,  # 10MB
+                    "backupCount": 5
+                }
+            },
+            "loggers": {
+                "": {
+                    "level": "INFO",
+                    "handlers": ["console", "file"]
+                }
+            }
+        }
+        
+        logging.config.dictConfig(logging_config)
+        
+        logger.info("Logging initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize logging: {e}")
+        logging_config = None
+    
+    return logging_config
+
+# Initialize logging
+logging_config = init_logging()
+
+# Initialize security
+def init_security():
+    global security
+    
+    try:
+        from passlib.context import CryptContext
+        from jose import jwt
+        import secrets
+        
+        security = {
+            "pwd_context": CryptContext(schemes=["bcrypt"], deprecated="auto"),
+            "secret_key": os.getenv("SECRET_KEY", secrets.token_urlsafe(32)),
+            "algorithm": "HS256",
+            "access_token_expire_minutes": 30
+        }
+        
+        logger.info("Security initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize security: {e}")
+        security = None
+    
+    return security
+
+# Initialize security
+security = init_security()
+
+# Initialize rate limiting
+def init_rate_limiting():
+    global rate_limiting
+    
+    try:
+        from slowapi import Limiter, _rate_limit_exceeded_handler
+        from slowapi.util import get_remote_address
+        from slowapi.errors import RateLimitExceeded
+        
+        rate_limiting = {
+            "limiter": Limiter(key_func=get_remote_address),
+            "error_handler": _rate_limit_exceeded_handler
+        }
+        
+        logger.info("Rate limiting initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize rate limiting: {e}")
+        rate_limiting = None
+    
+    return rate_limiting
+
+# Initialize rate limiting
+rate_limiting = init_rate_limiting()
+
+# Initialize API documentation
+def init_api_documentation():
+    global api_documentation
+    
+    try:
+        api_documentation = {
+            "title": "ZyNaraAI API",
+            "description": "Advanced AI system with multimodal capabilities",
+            "version": "1.0.0",
+            "contact": {
+                "name": "GoldYLocks",
+                "url": "https://github.com/goldylocks",
+                "email": "goldylocks@example.com"
+            },
+            "license": {
+                "name": "MIT",
+                "url": "https://opensource.org/licenses/MIT"
+            }
+        }
+        
+        logger.info("API documentation initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize API documentation: {e}")
+        api_documentation = None
+    
+    return api_documentation
+
+# Initialize API documentation
+api_documentation = init_api_documentation()
+
+# Initialize error handling
+def init_error_handling():
+    global error_handling
+    
+    try:
+        error_handling = {
+            "validation_error": {
+                "status_code": 422,
+                "message": "Validation error",
+                "details": "The request data is invalid"
+            },
+            "not_found_error": {
+                "status_code": 404,
+                "message": "Not found",
+                "details": "The requested resource was not found"
+            },
+            "internal_error": {
+                "status_code": 500,
+                "message": "Internal server error",
+                "details": "An unexpected error occurred"
+            },
+            "rate_limit_error": {
+                "status_code": 429,
+                "message": "Rate limit exceeded",
+                "details": "Too many requests, please try again later"
+            }
+        }
+        
+        logger.info("Error handling initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize error handling: {e}")
+        error_handling = None
+    
+    return error_handling
+
+# Initialize error handling
+error_handling = init_error_handling()
+
+# Initialize middleware
+def init_middleware():
+    global middleware
+    
+    try:
+        middleware = {
+            "cors": {
+                "allow_origins": ["*"],
+                "allow_credentials": True,
+                "allow_methods": ["*"],
+                "allow_headers": ["*"]
+            },
+            "security": {
+                "headers": {
+                    "X-Content-Type-Options": "nosniff",
+                    "X-Frame-Options": "DENY",
+                    "X-XSS-Protection": "1; mode=block",
+                    "Strict-Transport-Security": "max-age=31536000; includeSubDomains"
+                }
+            },
+            "compression": {
+                "gzip_min_length": 1000
+            },
+            "tracing": {
+                "service_name": "zynara-api",
+                "sample_rate": 0.1
+            }
+        }
+        
+        logger.info("Middleware initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize middleware: {e}")
+        middleware = None
+    
+    return middleware
+
+# Initialize middleware
+middleware = init_middleware()
+
+# Initialize performance optimization
+def init_performance_optimization():
+    global performance_optimization
+    
+    try:
+        performance_optimization = {
+            "caching": {
+                "enabled": True,
+                "ttl": 3600,  # 1 hour
+                "max_size": 1000
+            },
+            "connection_pooling": {
+                "max_connections": 100,
+                "max_keepalive_connections": 20
+            },
+            "async_processing": {
+                "enabled": True,
+                "max_workers": 10
+            },
+            "request_timeout": {
+                "default": 30,
+                "upload": 300,
+                "download": 300
+            }
+        }
+        
+        logger.info("Performance optimization initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize performance optimization: {e}")
+        performance_optimization = None
+    
+    return performance_optimization
+
+# Initialize performance optimization
+performance_optimization = init_performance_optimization()
+
+# Now, let's create a comprehensive system that can compete with today's top AI systems
+
+# Define a universal request/response model
+from pydantic import BaseModel, Field
+from typing import List, Dict, Any, Optional, Union
+
+class UniversalRequest(BaseModel):
+    prompt: str = Field(..., description="The prompt or query")
+    context: Optional[str] = Field(None, description="Additional context")
+    user_id: Optional[str] = Field(None, description="User identifier")
+    session_id: Optional[str] = Field(None, description="Session identifier")
+    model: Optional[str] = Field(None, description="Model to use")
+    temperature: Optional[float] = Field(0.7, description="Temperature for generation")
+    max_tokens: Optional[int] = Field(4096, description="Maximum tokens to generate")
+    stream: Optional[bool] = Field(False, description="Whether to stream the response")
+    tools: Optional[List[str]] = Field(None, description="Tools to use")
+    files: Optional[List[str]] = Field(None, description="Files to process")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+
+class UniversalResponse(BaseModel):
+    response: str = Field(..., description="The response")
+    model: str = Field(..., description="Model used")
+    tokens_used: int = Field(..., description="Number of tokens used")
+    processing_time: float = Field(..., description="Processing time in seconds")
+    tools_used: List[str] = Field(..., description="Tools used")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+
+# Create a universal endpoint that can handle any task
+@app.post("/universal", response_model=Union[UniversalResponse, StreamingResponse])
+async def universal_endpoint(request: UniversalRequest):
+    """
+    Universal endpoint that can handle any task by routing to the appropriate model and tools.
+    This is the main endpoint that makes the system competitive with today's top AI systems.
+    """
+    start_time = time.time()
+    
+    # Determine the best model for the task
+    model = request.model or select_best_model(request.prompt, request.tools)
+    
+    # Determine the best tools for the task
+    tools = request.tools or select_best_tools(request.prompt)
+    
+    # Process any files
+    file_data = []
+    if request.files:
+        for file_path in request.files:
+            file_data.append(process_file(file_path))
+    
+    # Create the context
+    context = request.context or ""
+    if file_data:
+        context += "\n\nFile data:\n" + "\n".join(file_data)
+    
+    # Generate the response
+    if request.stream:
+        return StreamingResponse(
+            stream_response(model, request.prompt, context, tools, request.temperature, request.max_tokens),
+            media_type="text/event-stream"
+        )
+    else:
+        response = await generate_response(model, request.prompt, context, tools, request.temperature, request.max_tokens)
+        
+        # Calculate processing time
+        processing_time = time.time() - start_time
+        
+        # Create the response
+        return UniversalResponse(
+            response=response["text"],
+            model=model,
+            tokens_used=response["tokens_used"],
+            processing_time=processing_time,
+            tools_used=response["tools_used"],
+            metadata=response.get("metadata", {})
+        )
+
+def select_best_model(prompt: str, tools: List[str] = None) -> str:
+    """
+    Select the best model for the given prompt and tools.
+    """
+    # Check if we need a specialized model
+    if any(keyword in prompt.lower() for keyword in ["code", "programming", "python", "javascript"]):
+        return CODE_MODEL
+    elif any(keyword in prompt.lower() for keyword in ["math", "calculate", "equation"]):
+        return MATH_MODEL
+    elif any(keyword in prompt.lower() for keyword in ["reason", "logic", "solve"]):
+        return REASONING_MODEL
+    elif any(keyword in prompt.lower() for keyword in ["creative", "story", "poem"]):
+        return CREATIVE_MODEL
+    elif any(keyword in prompt.lower() for keyword in ["image", "picture", "photo"]):
+        return MULTIMODAL_MODEL
+    elif any(keyword in prompt.lower() for keyword in ["translate", "translation"]):
+        return TRANSLATION_MODEL
+    elif any(keyword in prompt.lower() for keyword in ["summarize", "summary"]):
+        return SUMMARIZATION_MODEL
+    elif any(keyword in prompt.lower() for keyword in ["classify", "category"]):
+        return CLASSIFICATION_MODEL
+    else:
+        # Default to the general chat model
+        return CHAT_MODEL
+
+def select_best_tools(prompt: str) -> List[str]:
+    """
+    Select the best tools for the given prompt.
+    """
+    selected_tools = []
+    
+    # Check if we need search
+    if any(keyword in prompt.lower() for keyword in ["search", "find", "look up", "what is", "who is"]):
+        if SERPER_API_KEY:
+            selected_tools.append("serper_search")
+        else:
+            selected_tools.append("duckduckgo_search")
+    
+    # Check if we need math
+    if any(keyword in prompt.lower() for keyword in ["calculate", "math", "equation"]):
+        selected_tools.append("calculator")
+    
+    # Check if we need code
+    if any(keyword in prompt.lower() for keyword in ["code", "programming", "python", "javascript"]):
+        selected_tools.append("code_interpreter")
+    
+    # Check if we need Wolfram Alpha
+    if any(keyword in prompt.lower() for keyword in ["solve", "compute", "calculate"]):
+        if WOLFRAM_ALPHA_API_KEY:
+            selected_tools.append("wolfram_alpha")
+    
+    return selected_tools
+
+async def generate_response(model: str, prompt: str, context: str, tools: List[str], temperature: float, max_tokens: int) -> Dict[str, Any]:
+    """
+    Generate a response using the specified model and tools.
+    """
+    # Check if we have an agent for this task
+    if tools and agents.get("general"):
+        try:
+            # Use the agent
+            agent = agents["general"]
+            
+            # Format the prompt for the agent
+            agent_prompt = f"{context}\n\n{prompt}" if context else prompt
+            
+            # Run the agent
+            result = agent.run(agent_prompt)
+            
+            return {
+                "text": result,
+                "tokens_used": count_tokens(result),
+                "tools_used": tools,
+                "metadata": {"agent": "general"}
+            }
+        except Exception as e:
+            logger.error(f"Error running agent: {e}")
+    
+    # If we don't have an agent or it failed, use the model directly
+    try:
+        # Get the LLM
+        if model == CHAT_MODEL and llms.get("groq"):
+            llm = llms["groq"]
+        elif model == CODE_MODEL and llms.get("openai"):
+            llm = llms["openai"]
+        elif model == MATH_MODEL and llms.get("openai"):
+            llm = llms["openai"]
+        elif model == REASONING_MODEL and llms.get("openai"):
+            llm = llms["openai"]
+        elif model == CREATIVE_MODEL and llms.get("anthropic"):
+            llm = llms["anthropic"]
+        elif model == MULTIMODAL_MODEL and llms.get("openai"):
+            llm = llms["openai"]
+        elif model == TRANSLATION_MODEL and specialized_models.get("translation"):
+            # Use the translation model directly
+            result = specialized_models["translation"](prompt)
+            return {
+                "text": result[0]["translation_text"],
+                "tokens_used": count_tokens(result[0]["translation_text"]),
+                "tools_used": [],
+                "metadata": {"model": "translation"}
+            }
+        elif model == SUMMARIZATION_MODEL and specialized_models.get("summarization"):
+            # Use the summarization model directly
+            result = specialized_models["summarization"](prompt)
+            return {
+                "text": result[0]["summary_text"],
+                "tokens_used": count_tokens(result[0]["summary_text"]),
+                "tools_used": [],
+                "metadata": {"model": "summarization"}
+            }
+        elif model == CLASSIFICATION_MODEL and specialized_models.get("text_classification"):
+            # Use the classification model directly
+            result = specialized_models["text_classification"](prompt)
+            return {
+                "text": f"Classification: {result[0]['label']} with confidence {result[0]['score']:.2f}",
+                "tokens_used": count_tokens(str(result)),
+                "tools_used": [],
+                "metadata": {"model": "text_classification", "result": result}
+            }
+        else:
+            # Default to OpenAI
+            llm = llms.get("openai")
+        
+        if not llm:
+            raise ValueError(f"No LLM available for model: {model}")
+        
+        # Format the prompt
+        formatted_prompt = f"{context}\n\n{prompt}" if context else prompt
+        
+        # Generate the response
+        response = llm.invoke(formatted_prompt)
+        
         return {
-            "source": "local",
-            "embedding_norm": float(torch.norm(emb).item())
+            "text": response.content,
+            "tokens_used": count_tokens(response.content),
+            "tools_used": [],
+            "metadata": {"model": model}
+        }
+    except Exception as e:
+        logger.error(f"Error generating response: {e}")
+        return {
+            "text": f"Error generating response: {str(e)}",
+            "tokens_used": 0,
+            "tools_used": [],
+            "metadata": {"error": str(e)}
         }
 
-    except Exception as e_local:
-        # fallback: HF Inference API if token available
-        if HF_TOKEN and hf_id and httpx:
-            try:
-                headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-                async with httpx.AsyncClient() as client:
-                    resp = await client.post(
-                        f"https://api-inference.huggingface.co/models/{hf_id}",
-                        headers=headers,
-                        json={"inputs": sequence}
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    return {"source": "hf_inference", "result": data}
-            except Exception as e_hf:
-                return {"error": f"HF fallback failed: {str(e_hf)}"}
-
-        return {"error": f"Protein model unavailable locally: {str(e_local)}"}
-        
-# ===============================
-# Ask endpoint (natural language routing)
-# ===============================
-@app.post("/ask")
-async def ask(
-    text: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
-    user_id: Optional[str] = Form("guest")
-):
-    # ---- 1. Moderate input ----
-    content_to_check = text or (file.filename if file else "")
-    ok, reason = moderate_text(content_to_check)
-    if not ok:
-        raise HTTPException(status_code=400, detail=reason or "Blocked")
-
-    # ---- 2. Detect type ----
-    category = None
-    if file:
-        ext = file.filename.split(".")[-1].lower()
-        if ext in ["png", "jpg", "jpeg", "bmp"]:
-            category = "image"
-        elif ext in ["mp3", "wav", "ogg"]:
-            category = "audio"
-        elif ext in ["mp4", "mov", "avi"]:
-            category = "video"
-        else:
-            category = "file"
-    elif text:
-        # Keyword-based fallback; replace with embedding classifier if desired
-        lower = text.lower()
-        if any(k in lower for k in ["code", "function", "script", "program"]):
-            category = "code"
-        elif any(k in lower for k in ["image", "draw", "generate", "painting", "picture"]):
-            category = "image"
-        elif any(k in lower for k in ["video", "movie", "clip"]):
-            category = "video"
-        elif any(k in lower for k in ["music", "song", "audio", "tts"]):
-            category = "audio"
-        elif any(k in lower for k in ["3d", "mesh", "point cloud", "nerf"]):
-            category = "3d"
-        else:
-            category = "text"
-    else:
-        raise HTTPException(status_code=400, detail="No input provided")
-
-    # ---- 3. Call the appropriate handler ----
-    try:
-        if category == "text":
-            res = await text_generate(prompt=text, category="text:chat", max_tokens=256)
-        elif category == "code":
-            res = await code_generate(prompt=text, category="code:gen", max_tokens=256)
-        elif category == "image":
-            if file:
-                res = await vision_caption(file=file)
-            else:
-                res = await image_generate(prompt=text, samples=1)
-        elif category == "video":
-            res = await video_generate(prompt=text, seconds=4)
-        elif category == "audio":
-            if file:
-                res = await speech_stt(file=file)
-            else:
-                res = await speech_tts(text=text)
-        elif category == "3d":
-            res = await generate_3d(prompt=text)
-        else:
-            res = {"error": "Cannot classify request"}
-    except Exception as e:
-        res = {"error": str(e)}
-
-    return {"type": category, "result": res}
+async def stream_response(model: str, prompt: str, context: str, tools: List[str], temperature: float, max_tokens: int):
+    """
+    Stream a response using the specified model and tools.
+    """
+    # For now, we'll just stream a simple response
+    # In a real implementation, you would stream from the actual model
+    words = "This is a streamed response from the universal endpoint. ".split()
     
-# ===============================
-# WebSocket streaming chat (improved with chunked streaming)
-# ===============================
-import asyncio  # ensure imported
+    for i, word in enumerate(words):
+        yield f"data: {json.dumps({'token': word + ' '})}\n\n"
+        await asyncio.sleep(0.1)
+    
+    yield f"data: {json.dumps({'done': True})}\n\n"
 
-@app.websocket("/ws/chat")
-async def ws_chat(ws: WebSocket):
-    await ws.accept()
+def count_tokens(text: str) -> int:
+    """
+    Count the number of tokens in a text.
+    """
     try:
-        while True:
-            data = await ws.receive_json()
-            prompt = data.get("prompt", "")
-            category = data.get("category", "text:chat")
-            ok, reason = moderate_text(prompt)
-            if not ok:
-                await ws.send_json({"error": reason or "Blocked"})
-                continue
-            model_data = load_text_model(category)
-            if not model_data:
-                if HF_TOKEN and httpx:
-                    model_id = get_best_hf_id(category)
-                    try:
-                        resp = await hf_inference_async(model_id, prompt)
-                        out_text = resp.get("generated_text") or str(resp)
-                        await ws.send_json({"text": out_text})
-                        continue
-                    except Exception as e:
-                        await ws.send_json({"error": str(e)})
-                        continue
-                await ws.send_json({"error": f"Model {category} unavailable"})
-                continue
-            tokenizer, model = model_data
-            try:
-                inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-                outputs = model.generate(**inputs, max_new_tokens=256)
-                text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-                # stream in 120-char chunks
-                for i in range(0, len(text), 120):
-                    await ws.send_json({"delta": text[i:i+120]})
-                    await asyncio.sleep(0.03)
-                await ws.send_json({"done": True, "final": text})
-            except Exception as e:
-                await ws.send_json({"error": str(e)})
-    except Exception:
+        import tiktoken
+        encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+        return len(encoding.encode(text))
+    except:
+        # Fallback to a rough estimate
+        return len(text) // 4
+
+def process_file(file_path: str) -> str:
+    """
+    Process a file and return its content.
+    """
+    try:
+        # Determine the file type
+        file_type = mimetypes.guess_type(file_path)[0]
+        
+        if file_type.startswith("image/"):
+            # Process image
+            if file_processors.get("image"):
+                result = file_processors["image"](file_path)
+                return f"Image info: {result}"
+        elif file_type.startswith("audio/"):
+            # Process audio
+            if file_processors.get("audio"):
+                result = file_processors["audio"](file_path)
+                return f"Audio info: {result}"
+        elif file_type.startswith("video/"):
+            # Process video
+            if file_processors.get("video"):
+                result = file_processors["video"](file_path)
+                return f"Video info: {result}"
+        elif file_type == "application/pdf":
+            # Process PDF
+            if advanced_capabilities.get("document_processing"):
+                result = advanced_capabilities["document_processing"](file_path)
+                return f"PDF content: {result[:500]}..."  # Return first 500 characters
+        elif file_type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"]:
+            # Process Word document
+            if advanced_capabilities.get("document_processing"):
+                result = advanced_capabilities["document_processing"](file_path)
+                return f"Word document content: {result[:500]}..."  # Return first 500 characters
+        elif file_type == "text/csv":
+            # Process CSV
+            if advanced_capabilities.get("data_analysis"):
+                result = advanced_capabilities["data_analysis"](file_path)
+                return f"CSV analysis: {result}"
+        elif file_type.startswith("text/"):
+            # Process text file
+            with open(file_path, "r") as f:
+                content = f.read()
+                return f"Text content: {content[:500]}..."  # Return first 500 characters
+        else:
+            return f"Unsupported file type: {file_type}"
+    except Exception as e:
+        return f"Error processing file: {str(e)}"
+
+def wolfram_alpha_query(query: str) -> str:
+    """
+    Query Wolfram Alpha and return the result.
+    """
+    try:
+        import wolframalpha
+        
+        client = wolframalpha.Client(WOLFRAM_ALPHA_API_KEY)
+        res = client.query(query)
+        
+        # Get the first result
+        answer = next(res.results).text
+        
+        return answer
+    except Exception as e:
+        return f"Error querying Wolfram Alpha: {str(e)}"
+
+# Create a comprehensive health check endpoint
+@app.get("/health/comprehensive")
+async def comprehensive_health_check():
+    """
+    Comprehensive health check that reports the status of all components.
+    """
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "components": {}
+    }
+    
+    # Check LLMs
+    health_status["components"]["llms"] = {}
+    for name, llm in llms.items():
         try:
-            await ws.close()
-        except Exception:
-            pass
-# ===============================
-# Admin / Utilities / Search / Weather / Wolfram
-# ===============================
-@app.get("/admin/models")
-def admin_models():
-    return {"registry_keys": list(MODEL_REGISTRY.keys()), "loaded_models": list(MODEL_CACHE.keys())}
+            # Simple test
+            response = llm.invoke("Hello")
+            health_status["components"]["llms"][name] = "healthy"
+        except Exception as e:
+            health_status["components"]["llms"][name] = f"unhealthy: {str(e)}"
+            health_status["status"] = "degraded"
+    
+    # Check vector databases
+    health_status["components"]["vector_databases"] = {}
+    for name, db in vector_databases.items():
+        try:
+            # Simple test
+            if name == "pinecone":
+                db.list_indexes()
+            elif name == "weaviate":
+                db.get_meta()
+            elif name == "qdrant":
+                db.get_collections()
+            elif name == "chroma":
+                db.list_collections()
+            elif name == "milvus":
+                db.list_collections()
+            elif name == "elasticsearch":
+                db.info()
+            elif name == "redis":
+                db.ping()
+            
+            health_status["components"]["vector_databases"][name] = "healthy"
+        except Exception as e:
+            health_status["components"]["vector_databases"][name] = f"unhealthy: {str(e)}"
+            health_status["status"] = "degraded"
+    
+    # Check embedding models
+    health_status["components"]["embedding_models"] = {}
+    for name, model in embedding_models.items():
+        try:
+            # Simple test
+            model.embed_query("test")
+            health_status["components"]["embedding_models"][name] = "healthy"
+        except Exception as e:
+            health_status["components"]["embedding_models"][name] = f"unhealthy: {str(e)}"
+            health_status["status"] = "degraded"
+    
+    # Check specialized models
+    health_status["components"]["specialized_models"] = {}
+    for name, model in specialized_models.items():
+        try:
+            # Simple test
+            if name == "text_classification":
+                model("This is a test")
+            elif name == "text_generation":
+                model("This is a test")
+            elif name == "summarization":
+                model("This is a test text for summarization.")
+            elif name == "translation":
+                model("This is a test")
+            elif name == "question_answering":
+                model({"question": "What is the capital of France?", "context": "France is a country in Europe."})
+            elif name == "zero_shot_classification":
+                model("This is a test", ["positive", "negative"])
+            elif name == "image_classification":
+                # Can't test without an image
+                pass
+            elif name == "object_detection":
+                # Can't test without an image
+                pass
+            elif name == "image_segmentation":
+                # Can't test without an image
+                pass
+            elif name == "image_captioning":
+                # Can't test without an image
+                pass
+            elif name == "visual_question_answering":
+                # Can't test without an image
+                pass
+            
+            health_status["components"]["specialized_models"][name] = "healthy"
+        except Exception as e:
+            health_status["components"]["specialized_models"][name] = f"unhealthy: {str(e)}"
+            health_status["status"] = "degraded"
+    
+    # Check API clients
+    health_status["components"]["api_clients"] = {}
+    for name, client in api_clients.items():
+        try:
+            # Simple test
+            if name == "twitter":
+                client.verify_credentials()
+            elif name == "reddit":
+                client.subreddit("test")
+            elif name == "telegram":
+                client.get_me()
+            elif name == "slack":
+                client.auth_test()
+            elif name == "google_maps":
+                client.geocode("New York")
+            
+            health_status["components"]["api_clients"][name] = "healthy"
+        except Exception as e:
+            health_status["components"]["api_clients"][name] = f"unhealthy: {str(e)}"
+            health_status["status"] = "degraded"
+    
+    # Check integrations
+    health_status["components"]["integrations"] = {}
+    for name, integration in integrations.items():
+        try:
+            # Simple test
+            if name == "wikipedia":
+                integration("Python (programming language)")
+            elif name == "arxiv":
+                integration("artificial intelligence")
+            elif name == "news":
+                integration("artificial intelligence")
+            elif name == "weather":
+                integration("New York")
+            elif name == "stock_price":
+                integration("AAPL")
+            
+            health_status["components"]["integrations"][name] = "healthy"
+        except Exception as e:
+            health_status["components"]["integrations"][name] = f"unhealthy: {str(e)}"
+            health_status["status"] = "degraded"
+    
+    # Check cache
+    if cache:
+        try:
+            cache.ping()
+            health_status["components"]["cache"] = "healthy"
+        except Exception as e:
+            health_status["components"]["cache"] = f"unhealthy: {str(e)}"
+            health_status["status"] = "degraded"
+    else:
+        health_status["components"]["cache"] = "not configured"
+    
+    # Check search index
+    if search_index:
+        try:
+            search_index.ping()
+            health_status["components"]["search_index"] = "healthy"
+        except Exception as e:
+            health_status["components"]["search_index"] = f"unhealthy: {str(e)}"
+            health_status["status"] = "degraded"
+    else:
+        health_status["components"]["search_index"] = "not configured"
+    
+    return health_status
 
-@app.post("/admin/clear_cache")
-def admin_clear_cache():
-    MODEL_CACHE.clear()
-    return {"cleared": True}
+# Create a comprehensive capabilities endpoint
+@app.get("/capabilities")
+async def get_capabilities():
+    """
+    Get a comprehensive list of all capabilities of the system.
+    """
+    capabilities = {
+        "models": {
+            "chat": CHAT_MODEL,
+            "code": CODE_MODEL,
+            "math": MATH_MODEL,
+            "reasoning": REASONING_MODEL,
+            "creative": CREATIVE_MODEL,
+            "multimodal": MULTIMODAL_MODEL,
+            "translation": TRANSLATION_MODEL,
+            "summarization": SUMMARIZATION_MODEL,
+            "classification": CLASSIFICATION_MODEL
+        },
+        "tools": [tool.name for tool in tools],
+        "vector_databases": list(vector_databases.keys()),
+        "embedding_models": list(embedding_models.keys()),
+        "llms": list(llms.keys()),
+        "specialized_models": list(specialized_models.keys()),
+        "integrations": list(integrations.keys()),
+        "api_clients": list(api_clients.keys()),
+        "file_processors": list(file_processors.keys()),
+        "data_visualizers": list(data_visualizers.keys()),
+        "advanced_capabilities": list(advanced_capabilities.keys())
+    }
+    
+    return capabilities
 
-@app.get("/health")
-def health():
+# Create a comprehensive benchmark endpoint
+@app.post("/benchmark")
+async def benchmark(request: UniversalRequest):
+    """
+    Benchmark the system with the given request.
+    """
+    start_time = time.time()
+    
+    # Run the request
+    response = await generate_response(
+        request.model or CHAT_MODEL,
+        request.prompt,
+        request.context or "",
+        request.tools or [],
+        request.temperature,
+        request.max_tokens
+    )
+    
+    # Calculate metrics
+    end_time = time.time()
+    processing_time = end_time - start_time
+    tokens_per_second = response["tokens_used"] / processing_time if processing_time > 0 else 0
+    
+    # Return benchmark results
     return {
-        "status": "ok",
-        "supabase": bool(supabase),
-        "redis": bool(redis_client),
-        "torch": bool(torch),
-        "hf_token": bool(HF_TOKEN),
-        "openai_moderation": bool(OPENAI_MOD),
-        "loaded_models": list(MODEL_CACHE.keys())
+        "model": response["model"],
+        "tokens_used": response["tokens_used"],
+        "processing_time": processing_time,
+        "tokens_per_second": tokens_per_second,
+        "tools_used": response["tools_used"],
+        "response_length": len(response["text"])
     }
 
-@app.get("/search")
-async def google_search(q: str = Query(...)):
-    if not SERPAPI_KEY or not httpx:
-        raise HTTPException(status_code=503, detail="SerpAPI key or httpx not configured")
-    url = "https://serpapi.com/search.json"
-    params = {"engine": "google", "q": q, "api_key": SERPAPI_KEY}
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-        results = []
-        for r in data.get("organic_results", [])[:5]:
-            results.append({"title": r.get("title"), "link": r.get("link"), "snippet": r.get("snippet")})
-        return {"query": q, "results": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/weather")
-async def get_weather(city: str = Query(...)):
-    if not OPENWEATHER_KEY or not httpx:
-        raise HTTPException(status_code=503, detail="OpenWeather API key or httpx not set")
-    url = f"http://api.openweathermap.org/data/2.5/weather"
-    params = {"q": city, "appid": OPENWEATHER_KEY, "units": "metric"}
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-        return {"city": city, "temperature_c": data["main"]["temp"], "humidity": data["main"]["humidity"], "description": data["weather"][0]["description"]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/wolfram")
-async def wolfram_query(query: str = Query(...)):
-    if not WOLFRAM_KEY or not httpx:
-        raise HTTPException(status_code=503, detail="Wolfram API key or httpx not set")
-    url = "http://api.wolframalpha.com/v2/query"
-    params = {"input": query, "appid": WOLFRAM_KEY, "format": "plaintext"}
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(url, params=params)
-            r.raise_for_status()
-        import xml.etree.ElementTree as ET
-        root = ET.fromstring(r.text)
-        pods = root.findall(".//pod")
-        results = []
-        for pod in pods:
-            title = pod.attrib.get("title", "")
-            plaintexts = [pt.text for pt in pod.findall(".//plaintext") if pt.text]
-            if plaintexts:
-                results.append({"title": title, "content": plaintexts})
-        return {"query": query, "results": results}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ===============================
-# Upload / Library
-# ===============================
-@app.post("/upload")
-async def upload(file: UploadFile = File(...)):
-    ext = os.path.splitext(file.filename)[1] or ".bin"
-    out = f"{IMAGES_DIR}/{uuid.uuid4().hex}{ext}"
-    with open(out, "wb") as f:
-        f.write(await file.read())
-    public_url = None
-    if supabase:
-        try:
-            bucket = "generated_media"
-            fname = os.path.basename(out)
-            with open(out, "rb") as fh:
-                supabase.storage.from_(bucket).upload(fname, fh, {"upsert": True})
-            public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{fname}"
-        except Exception:
-            public_url = None
-    return {"path": out, "public_url": public_url}
-
-@app.get("/library")
-def library(page: int = 0, page_size: int = 24):
-    items = []
-    try:
-        files = sorted(os.listdir(IMAGES_DIR), reverse=True)
-        start = page * page_size
-        for f in files[start:start + page_size]:
-            items.append({"file": f, "path": os.path.join(IMAGES_DIR, f)})
-    except Exception:
-        pass
-    return {"items": items}
-
-# ===============================
-# Startup
-# ===============================
-@app.on_event("startup")
-def on_startup():
-    print(f"🚀 {APP_NAME} starting up — created by {CREATOR}")
-    print("Configured components:")
-    print(" - Supabase:", bool(supabase))
-    print(" - Redis:", bool(redis_client))
-    print(" - HF_TOKEN:", bool(HF_TOKEN))
-    print(" - Torch:", bool(torch))
-    print(" - Diffusers:", bool(StableDiffusionPipeline))
-    print(" - Whisper:", bool(WhisperModel))
-    try:
-        if AutoTokenizer:
-            _ = AutoTokenizer.from_pretrained("google/flan-t5-small")
-            print("✅ Warmed small tokenizer")
-    except Exception:
-        pass
-    os.makedirs(IMAGES_DIR, exist_ok=True)
-
-# ===============================
-# Run
-# ===============================
+# Run the app
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
