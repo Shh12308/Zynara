@@ -1,0 +1,44 @@
+name: zynara-ai
+version: 1.0.0
+description: Advanced AI system with multimodal capabilities
+
+# Container configuration
+container:
+  image: your-registry/zynara-ai:latest
+  port: 8000
+
+# GPU configuration
+gpu:
+  type: A100
+  count: 1
+
+# Storage
+storage:
+  size: 100GB
+  type: NVMe
+
+# Network
+network:
+  port: 8000
+  protocol: HTTP
+
+# Environment variables (set these in RunPod UI, not here)
+env:
+  - name: PYTHONUNBUFFERED
+    value: "1"
+  - name: CUDA_VISIBLE_DEVICES
+    value: "0"
+
+# Health check
+health_check:
+  path: /health
+  interval: 30s
+  timeout: 10s
+  retries: 3
+
+# Autoscaling
+autoscaling:
+  min_instances: 1
+  max_instances: 5
+  target_cpu: 70
+  target_memory: 80
