@@ -1,76 +1,77 @@
-# ---- API Framework ----
-fastapi
-uvicorn[standard]
-pydantic
-python-multipart
+# Core dependencies
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+pydantic>=2.5.0
+python-multipart>=0.0.6
+httpx>=0.25.2
+sse-starlette>=1.6.5
 
-# ---- HuggingFace ----
-transformers
-huggingface-hub
-accelerate
-sentence-transformers
+# AI/ML dependencies
+torch>=2.1.0
+torchvision>=0.16.0
+transformers>=4.35.2
+langchain>=0.0.340
+openai>=1.3.7
+anthropic>=0.7.8
+sentence-transformers>=2.2.2
+accelerate>=0.24.1
+bitsandbytes>=0.41.2
 
-# ---- Diffusion / SDXL ----
-diffusers
-xformers
+# Computer vision
+opencv-python>=4.8.1.78
+ultralytics>=8.0.206
+Pillow>=10.1.0
 
-# ---- Torch (installed separately via CUDA installer) ----
-# torch
-# torchvision
-# torchaudio
+# Data processing
+numpy>=1.24.3
+pandas>=2.1.3
+scikit-learn>=1.3.2
+scipy>=1.11.4
 
-# ---- Vision / OCR / Detection ----
-Pillow
-opencv-python
-ultralytics
-scikit-image
-pytesseract
+# Vector databases
+chromadb>=0.4.15
+faiss-cpu>=1.7.4
+pinecone-client>=2.2.4
+weaviate-client>=3.25.3
+qdrant-client>=1.6.4
 
-# ---- Whisper STT ----
-openai-whisper
+# Web scraping
+beautifulsoup4>=4.12.2
+trafilatura>=1.6.4
+requests>=2.31.0
 
-# ---- Music Generation ----
-audiocraft
+# Document processing
+PyMuPDF>=1.23.8
+python-docx>=1.1.0
+python-pptx>=0.6.21
 
-# ---- Audio Processing ----
-soundfile
-pydub
-librosa
-ffmpeg-python
+# Audio processing
+librosa>=0.10.1
+soundfile>=0.12.1
+SpeechRecognition>=3.10.0
 
-# ---- Model Utilities ----
-einops
-safetensors
-numpy
-scipy
+# Video processing
+moviepy>=1.0.3
+imageio>=2.31.6
 
-# ---- Tools for 3D / Point-E ----
-trimesh
-plotly
+# Visualization
+matplotlib>=3.8.2
+plotly>=5.17.0
+seaborn>=0.13.0
 
-# ---- Supabase / Redis / Memory ----
-supabase
-redis
-asyncio
+# Monitoring
+prometheus-client>=0.19.0
+whylogs>=1.2.9
 
-# ---- Security / Moderation ----
-openai
+# Authentication & security
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+python-multipart>=0.0.6
 
-# ---- File Processing ----
-python-docx
-PyPDF2
+# Database
+supabase>=1.0.4
+redis>=5.0.1
 
-# ---- Streaming & Websockets ----
-websockets
-sse-starlette
-starlette
-
-# ---- Logging / Debug ----
-loguru
-
-# ---- Uploads / Storage ----
-boto3
-
-# ---- Extra backend tools ----
-tqdm
-requests
+# Misc
+python-dotenv>=1.0.0
+pydantic-settings>=2.1.0
