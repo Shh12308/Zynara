@@ -3695,6 +3695,8 @@ class UniversalResponse(BaseModel):
 
 # Create a universal endpoint that can handle any task
 @app.post("/universal", response_model=Union[UniversalResponse, StreamingResponse])
+# Add to main.py - Enhanced Universal Endpoint
+@app.post("/universal", response_model=Union[UniversalResponse, StreamingResponse])
 async def universal_endpoint(request: UniversalRequest):
     """
     Universal endpoint that can handle any task by routing to the appropriate model and tools.
@@ -3719,8 +3721,118 @@ async def universal_endpoint(request: UniversalRequest):
     if file_data:
         context += "\n\nFile data:\n" + "\n".join(file_data)
     
+    # Check for special commands in the prompt
+    if "create a tool" in request.prompt.lower():
+        # Extract task description from prompt
+        task_description = request.prompt.replace("create a tool", "").strip()
+        tool = await tool_learner.create_tool(task_description)
+        return UniversalResponse(
+            response=json.dumps(tool, indent=2),
+            model="tool_learner",
+            tokens_used=count_tokens(json.dumps(tool)),
+            processing_time=time.time() - start_time,
+            tools_used=["tool_learner"],
+            metadata={"type": "tool_creation"}
+        )
+    
+    elif "reason step by step" in request.prompt.lower() or "explain your reasoning" in request.prompt.lower():
+        # Use reasoning engine
+        problem = request.prompt.replace("reason step by step", "").replace("explain your reasoning", "").strip()
+        response_text = await reasoning_engine.reason_step_by_step(problem)
+        return UniversalResponse(
+            response=response_text,
+            model="reasoning_engine",
+            tokens_used=count_tokens(response_text),
+            processing_time=time.time() - start_time,
+            tools_used=["reasoning_engine"],
+            metadata={"type": "reasoning"}
+        )
+    
+    elif "remember" in request.prompt.lower():
+        # Store in episodic memory
+        interaction = {
+            "user_id": request.user_id or "anonymous",
+            "prompt": request.prompt,
+            "context": context,
+            "timestamp": datetime.now().isoformat()
+        }
+        await episodic_memory.store_episode(interaction)
+        return UniversalResponse(
+            response="I'll remember that for future conversations.",
+            model="episodic_memory",
+            tokens_used=count_tokens("I'll remember that for future conversations."),
+            processing_time=time.time() - start_time,
+            tools_used=["episodic_memory"],
+            metadata={"type": "memory_storage"}
+        )
+    
+    elif "optimize costs" in request.prompt.lower():
+        # Get cost optimization suggestions
+        optimizations = await cost_optimizer.optimize_costs()
+        return UniversalResponse(
+            response=json.dumps(optimizations, indent=2),
+            model="cost_optimizer",
+            tokens_used=count_tokens(json.dumps(optimizations)),
+            processing_time=time.time() - start_time,
+            tools_used=["cost_optimizer"],
+            metadata={"type": "cost_optimization"}
+        )
+    
+    elif "quantum optimize" in request.prompt.lower():
+        # Extract model configuration from prompt or use defaults
+        model_config = {
+            "learning_rate": 0.001,
+            "batch_size": 32,
+            "epochs": 10
+        }
+        optimized_config = await quantum_optimizer.optimize_hyperparameters(model_config)
+        return UniversalResponse(
+            response=json.dumps(optimized_config, indent=2),
+            model="quantum_optimizer",
+            tokens_used=count_tokens(json.dumps(optimized_config)),
+            processing_time=time.time() - start_time,
+            tools_used=["quantum_optimizer"],
+            metadata={"type": "quantum_optimization"}
+        )
+    
+    elif "self improve" in request.prompt.lower():
+        # Trigger self-improvement process
+        await self_improving_system.self_improve()
+        return UniversalResponse(
+            response="Self-improvement process initiated. I'll analyze my performance and make improvements.",
+            model="self_improving_system",
+            tokens_used=count_tokens("Self-improvement process initiated. I'll analyze my performance and make improvements."),
+            processing_time=time.time() - start_time,
+            tools_used=["self_improving_system"],
+            metadata={"type": "self_improvement"}
+        )
+    
+    elif "benchmark" in request.prompt.lower():
+        # Run benchmark
+        response = await generate_response(model, request.prompt, context, tools, request.temperature, request.max_tokens)
+        processing_time = time.time() - start_time
+        tokens_per_second = response["tokens_used"] / processing_time if processing_time > 0 else 0
+        
+        benchmark_result = {
+            "model": response["model"],
+            "tokens_used": response["tokens_used"],
+            "processing_time": processing_time,
+            "tokens_per_second": tokens_per_second,
+            "tools_used": response["tools_used"],
+            "response_length": len(response["text"])
+        }
+        
+        return UniversalResponse(
+            response=json.dumps(benchmark_result, indent=2),
+            model="benchmark",
+            tokens_used=count_tokens(json.dumps(benchmark_result)),
+            processing_time=processing_time,
+            tools_used=["benchmark"],
+            metadata={"type": "benchmark", "result": benchmark_result}
+        )
+    
     # Check if we should use advanced RAG
-    use_rag = any(keyword in request.prompt.lower() for keyword in ["search", "find", "look up", "what is", "who is"])
+    use_rag = any(keyword in request.prompt.lower() for keyword in ["search", "find", "look up", "what is", "who is", "latest"])
     
     # Generate the response
     if request.stream:
@@ -3754,31 +3866,7 @@ async def universal_endpoint(request: UniversalRequest):
             metadata=response.get("metadata", {})
         )
 
-def select_best_model(prompt: str, tools: List[str] = None) -> str:
-    """
-    Select the best model for the given prompt and tools.
-    """
-    # Check if we need a specialized model
-    if any(keyword in prompt.lower() for keyword in ["code", "programming", "python", "javascript"]):
-        return CODE_MODEL
-    elif any(keyword in prompt.lower() for keyword in ["math", "calculate", "equation"]):
-        return MATH_MODEL
-    elif any(keyword in prompt.lower() for keyword in ["reason", "logic", "solve"]):
-        return REASONING_MODEL
-    elif any(keyword in prompt.lower() for keyword in ["creative", "story", "poem"]):
-        return CREATIVE_MODEL
-    elif any(keyword in prompt.lower() for keyword in ["image", "picture", "photo"]):
-        return MULTIMODAL_MODEL
-    elif any(keyword in prompt.lower() for keyword in ["translate", "translation"]):
-        return TRANSLATION_MODEL
-    elif any(keyword in prompt.lower() for keyword in ["summarize", "summary"]):
-        return SUMMARIZATION_MODEL
-    elif any(keyword in prompt.lower() for keyword in ["classify", "category"]):
-        return CLASSIFICATION_MODEL
-    else:
-        # Default to the general chat model
-        return CHAT_MODEL
-
+# Enhanced tool selection function
 def select_best_tools(prompt: str) -> List[str]:
     """
     Select the best tools for the given prompt.
@@ -3786,33 +3874,70 @@ def select_best_tools(prompt: str) -> List[str]:
     selected_tools = []
     
     # Check if we need search
-    if any(keyword in prompt.lower() for keyword in ["search", "find", "look up", "what is", "who is"]):
+    if any(keyword in prompt.lower() for keyword in ["search", "find", "look up", "what is", "who is", "latest"]):
         if SERPER_API_KEY:
             selected_tools.append("serper_search")
         else:
             selected_tools.append("duckduckgo_search")
     
+    # Check if we need Wikipedia
+    if any(keyword in prompt.lower() for keyword in ["wikipedia", "explain"]):
+        selected_tools.append("wikipedia")
+    
+    # Check if we need arXiv
+    if any(keyword in prompt.lower() for keyword in ["research", "paper", "arxiv"]):
+        selected_tools.append("arxiv")
+    
+    # Check if we need news
+    if any(keyword in prompt.lower() for keyword in ["news", "headlines", "current events"]):
+        selected_tools.append("news")
+    
+    # Check if we need weather
+    if any(keyword in prompt.lower() for keyword in ["weather", "forecast", "temperature"]):
+        selected_tools.append("weather")
+    
+    # Check if we need stock prices
+    if any(keyword in prompt.lower() for keyword in ["stock", "price", "market", "ticker"]):
+        selected_tools.append("stock_price")
+    
     # Check if we need math
-    if any(keyword in prompt.lower() for keyword in ["calculate", "math", "equation"]):
+    if any(keyword in prompt.lower() for keyword in ["calculate", "math", "equation", "solve"]):
         selected_tools.append("calculator")
     
-    # Check if we need code
-    if any(keyword in prompt.lower() for keyword in ["code", "programming", "python", "javascript"]):
-        selected_tools.append("code_interpreter")
-    
     # Check if we need Wolfram Alpha
-    if any(keyword in prompt.lower() for keyword in ["solve", "compute", "calculate"]):
+    if any(keyword in prompt.lower() for keyword in ["compute", "calculate", "equation", "solve"]):
         if WOLFRAM_ALPHA_API_KEY:
             selected_tools.append("wolfram_alpha")
     
+    # Check if we need code
+    if any(keyword in prompt.lower() for keyword in ["code", "programming", "python", "javascript", "function"]):
+        selected_tools.append("code_interpreter")
+    
+    # Check if we need Google Maps
+    if any(keyword in prompt.lower() for keyword in ["map", "location", "direction", "address"]):
+        selected_tools.append("google_maps")
+    
+    # Check if we need file processing
+    if any(keyword in prompt.lower() for keyword in ["pdf", "document", "file", "image", "audio", "video"]):
+        selected_tools.append("file_processor")
+    
+    # Check if we need data analysis
+    if any(keyword in prompt.lower() for keyword in ["analyze", "data", "statistics", "chart", "graph"]):
+        selected_tools.append("data_analysis")
+    
+    # Check if we need visualization
+    if any(keyword in prompt.lower() for keyword in ["plot", "chart", "graph", "visualize"]):
+        selected_tools.append("data_visualizer")
+    
     return selected_tools
 
+# Enhanced generate_response function
 async def generate_response(model: str, prompt: str, context: str, tools: List[str], temperature: float, max_tokens: int) -> Dict[str, Any]:
     """
     Generate a response using the specified model and tools.
     """
     # Check if we should use chain-of-thought reasoning
-    use_cot = any(keyword in prompt.lower() for keyword in ["reason", "logic", "solve", "step by step"])
+    use_cot = any(keyword in prompt.lower() for keyword in ["reason", "logic", "solve", "step by step", "explain"])
     
     if use_cot:
         # Use reasoning engine for complex problems
@@ -3823,6 +3948,112 @@ async def generate_response(model: str, prompt: str, context: str, tools: List[s
             "tools_used": tools,
             "metadata": {"model": model, "cot": True}
         }
+    
+    # Check if we need to use integrations based on tools
+    if "wikipedia" in tools:
+        try:
+            # Extract query from prompt
+            query = prompt.replace("wikipedia", "").replace("explain", "").strip()
+            result = integrations["wikipedia"](query)
+            return {
+                "text": result,
+                "tokens_used": count_tokens(result),
+                "tools_used": ["wikipedia"],
+                "metadata": {"model": "wikipedia"}
+            }
+        except Exception as e:
+            logger.error(f"Wikipedia integration failed: {e}")
+    
+    if "arxiv" in tools:
+        try:
+            # Extract query from prompt
+            query = prompt.replace("arxiv", "").replace("research", "").replace("paper", "").strip()
+            results = integrations["arxiv"](query)
+            return {
+                "text": json.dumps(results, indent=2),
+                "tokens_used": count_tokens(json.dumps(results)),
+                "tools_used": ["arxiv"],
+                "metadata": {"model": "arxiv"}
+            }
+        except Exception as e:
+            logger.error(f"arXiv integration failed: {e}")
+    
+    if "news" in tools:
+        try:
+            # Extract query from prompt
+            query = prompt.replace("news", "").replace("headlines", "").replace("current events", "").strip()
+            results = integrations["news"](query)
+            return {
+                "text": json.dumps(results, indent=2),
+                "tokens_used": count_tokens(json.dumps(results)),
+                "tools_used": ["news"],
+                "metadata": {"model": "news"}
+            }
+        except Exception as e:
+            logger.error(f"News integration failed: {e}")
+    
+    if "weather" in tools:
+        try:
+            # Extract location from prompt
+            location = prompt.replace("weather", "").replace("forecast", "").replace("temperature", "").strip()
+            result = integrations["weather"](location)
+            return {
+                "text": json.dumps(result, indent=2),
+                "tokens_used": count_tokens(json.dumps(result)),
+                "tools_used": ["weather"],
+                "metadata": {"model": "weather"}
+            }
+        except Exception as e:
+            logger.error(f"Weather integration failed: {e}")
+    
+    if "stock_price" in tools:
+        try:
+            # Extract symbol from prompt
+            symbol = prompt.replace("stock", "").replace("price", "").replace("market", "").replace("ticker", "").strip()
+            result = integrations["stock_price"](symbol)
+            return {
+                "text": json.dumps(result, indent=2),
+                "tokens_used": count_tokens(json.dumps(result)),
+                "tools_used": ["stock_price"],
+                "metadata": {"model": "stock_price"}
+            }
+        except Exception as e:
+            logger.error(f"Stock price integration failed: {e}")
+    
+    if "google_maps" in tools:
+        try:
+            # Extract location from prompt
+            location = prompt.replace("map", "").replace("location", "").replace("direction", "").replace("address", "").strip()
+            result = api_clients["google_maps"].geocode(location)
+            return {
+                "text": json.dumps(result, indent=2),
+                "tokens_used": count_tokens(json.dumps(result)),
+                "tools_used": ["google_maps"],
+                "metadata": {"model": "google_maps"}
+            }
+        except Exception as e:
+            logger.error(f"Google Maps integration failed: {e}")
+    
+    if "file_processor" in tools:
+        try:
+            # This would be handled by the file processing logic in the universal endpoint
+            pass
+        except Exception as e:
+            logger.error(f"File processing failed: {e}")
+    
+    if "data_analysis" in tools:
+        try:
+            # This would be handled by the data analysis logic in the universal endpoint
+            pass
+        except Exception as e:
+            logger.error(f"Data analysis failed: {e}")
+    
+    if "data_visualizer" in tools:
+        try:
+            # This would be handled by the data visualization logic in the universal endpoint
+            pass
+        except Exception as e:
+            logger.error(f"Data visualization failed: {e}")
     
     # Check if we have an agent for this task
     if tools and agents.get("general"):
@@ -3914,81 +4145,6 @@ async def generate_response(model: str, prompt: str, context: str, tools: List[s
             "tools_used": [],
             "metadata": {"error": str(e)}
         }
-
-async def stream_response(model: str, prompt: str, context: str, tools: List[str], temperature: float, max_tokens: int):
-    """
-    Stream a response using the specified model and tools.
-    """
-    # For now, we'll just stream a simple response
-    # In a real implementation, you would stream from the actual model
-    words = "This is a streamed response from the universal endpoint. ".split()
-    
-    for i, word in enumerate(words):
-        yield f"data: {json.dumps({'token': word + ' '})}\n\n"
-        await asyncio.sleep(0.1)
-    
-    yield f"data: {json.dumps({'done': True})}\n\n"
-
-def count_tokens(text: str) -> int:
-    """
-    Count the number of tokens in a text.
-    """
-    try:
-        import tiktoken
-        encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
-        return len(encoding.encode(text))
-    except:
-        # Fallback to a rough estimate
-        return len(text) // 4
-
-def process_file(file_path: str) -> str:
-    """
-    Process a file and return its content.
-    """
-    try:
-        # Determine the file type
-        file_type = mimetypes.guess_type(file_path)[0]
-        
-        if file_type.startswith("image/"):
-            # Process image
-            if file_processors.get("image"):
-                result = file_processors["image"](file_path)
-                return f"Image info: {result}"
-        elif file_type.startswith("audio/"):
-            # Process audio
-            if file_processors.get("audio"):
-                result = file_processors["audio"](file_path)
-                return f"Audio info: {result}"
-        elif file_type.startswith("video/"):
-            # Process video
-            if file_processors.get("video"):
-                result = file_processors["video"](file_path)
-                return f"Video info: {result}"
-        elif file_type == "application/pdf":
-            # Process PDF
-            if advanced_capabilities.get("document_processing"):
-                result = advanced_capabilities["document_processing"](file_path)
-                return f"PDF content: {result[:500]}..."  # Return first 500 characters
-        elif file_type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"]:
-            # Process Word document
-            if advanced_capabilities.get("document_processing"):
-                result = advanced_capabilities["document_processing"](file_path)
-                return f"Word document content: {result[:500]}..."  # Return first 500 characters
-        elif file_type == "text/csv":
-            # Process CSV
-            if advanced_capabilities.get("data_analysis"):
-                result = advanced_capabilities["data_analysis"](file_path)
-                return f"CSV analysis: {result}"
-        elif file_type.startswith("text/"):
-            # Process text file
-            with open(file_path, "r") as f:
-                content = f.read()
-                return f"Text content: {content[:500]}..."  # Return first 500 characters
-        else:
-            return f"Unsupported file type: {file_type}"
-    except Exception as e:
-        return f"Error processing file: {str(e)}"
-
 # Create a comprehensive health check endpoint
 @app.get("/health/comprehensive")
 async def comprehensive_health_check():
