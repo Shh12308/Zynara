@@ -4490,7 +4490,531 @@ async def self_improve_endpoint():
     await self_improving_system.self_improve()
     return {"status": "self-improvement initiated"}
 
+# Missing utility functions
+def count_tokens(text: str) -> int:
+    """Count tokens in text using a simple approximation"""
+    # In a real implementation, you would use the tokenizer from the model
+    # For now, we'll use a simple approximation: 1 token ≈ 4 characters
+    return len(text) // 4
+
+def process_file(file_path: str) -> str:
+    """Process a file and return its content"""
+    try:
+        # Determine file type
+        file_ext = os.path.splitext(file_path)[1].lower()
+        
+        if file_ext == '.pdf':
+            # Process PDF
+            import PyPDF2
+            with open(file_path, 'rb') as file:
+                reader = PyPDF2.PdfReader(file)
+                text = ""
+                for page in reader.pages:
+                    text += page.extract_text()
+            return text
+        
+        elif file_ext in ['.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml', '.csv']:
+            # Process text file
+            with open(file_path, 'r', encoding='utf-8') as file:
+                return file.read()
+        
+        elif file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp']:
+            # Process image
+            from PIL import Image
+            import pytesseract
+            img = Image.open(file_path)
+            return pytesseract.image_to_string(img)
+        
+        elif file_ext in ['.mp3', '.wav', '.flac', '.ogg']:
+            # Process audio
+            import speech_recognition as sr
+            r = sr.Recognizer()
+            with sr.AudioFile(file_path) as source:
+                audio = r.record(source)
+            return r.recognize_google(audio)
+        
+        elif file_ext in ['.mp4', '.avi', '.mov', '.wmv']:
+            # Process video (extract audio first)
+            import moviepy.editor as mp
+            video = mp.VideoFileClip(file_path)
+            audio_file = "temp_audio.wav"
+            video.audio.write_audiofile(audio_file)
+            
+            # Process the extracted audio
+            import speech_recognition as sr
+            r = sr.Recognizer()
+            with sr.AudioFile(audio_file) as source:
+                audio_data = r.record(source)
+            text = r.recognize_google(audio_data)
+            
+            # Clean up
+            os.remove(audio_file)
+            return text
+        
+        else:
+            return f"Unsupported file type: {file_ext}"
+    
+    except Exception as e:
+        return f"Error processing file: {str(e)}"
+
+async def stream_response(model: str, prompt: str, context: str, tools: List[str], temperature: float, max_tokens: int):
+    """Stream response from the model"""
+    try:
+        # Get the LLM
+        if model == CHAT_MODEL and llms.get("groq"):
+            llm = llms["groq"]
+        elif model == CODE_MODEL and llms.get("openai"):
+            llm = llms["openai"]
+        elif model == MATH_MODEL and llms.get("openai"):
+            llm = llms["openai"]
+        elif model == REASONING_MODEL and llms.get("openai"):
+            llm = llms["openai"]
+        elif model == CREATIVE_MODEL and llms.get("anthropic"):
+            llm = llms["anthropic"]
+        elif model == MULTIMODAL_MODEL and llms.get("openai"):
+            llm = llms["openai"]
+        else:
+            # Default to OpenAI
+            llm = llms.get("openai")
+        
+        if not llm:
+            yield f"data: {json.dumps({'error': 'No LLM available'})}\n\n"
+            return
+        
+        # Format the prompt
+        formatted_prompt = f"{context}\n\n{prompt}" if context else prompt
+        
+        # Stream the response
+        async for chunk in llm.astream(formatted_prompt):
+            if hasattr(chunk, 'content') and chunk.content:
+                yield f"data: {json.dumps({'content': chunk.content})}\n\n"
+        
+        yield f"data: {json.dumps({'done': True})}\n\n"
+    
+    except Exception as e:
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+# Additional endpoints for system management
+
+@app.post("/system/reload")
+async def reload_system():
+    """Reload the system configuration"""
+    try:
+        # Reload environment variables
+        load_dotenv()
+        
+        # Reinitialize components
+        await initialize_system()
+        
+        return {"status": "success", "message": "System reloaded successfully"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/system/backup")
+async def backup_system():
+    """Create a backup of the system state"""
+    try:
+        # Create backup directory
+        backup_dir = f"backups/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        os.makedirs(backup_dir, exist_ok=True)
+        
+        # Save configuration
+        config = {
+            "models": {
+                "chat": CHAT_MODEL,
+                "code": CODE_MODEL,
+                "math": MATH_MODEL,
+                "reasoning": REASONING_MODEL,
+                "creative": CREATIVE_MODEL,
+                "multimodal": MULTIMODAL_MODEL,
+                "translation": TRANSLATION_MODEL,
+                "summarization": SUMMARIZATION_MODEL,
+                "classification": CLASSIFICATION_MODEL
+            },
+            "tools": [tool.name for tool in tools],
+            "vector_databases": list(vector_databases.keys()),
+            "embedding_models": list(embedding_models.keys()),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        with open(f"{backup_dir}/config.json", "w") as f:
+            json.dump(config, f, indent=2)
+        
+        # Save episodic memory
+        if episodic_memory:
+            memory_data = episodic_memory.get_all_episodes()
+            with open(f"{backup_dir}/episodic_memory.json", "w") as f:
+                json.dump(memory_data, f, indent=2)
+        
+        return {"status": "success", "backup_dir": backup_dir}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/system/restore")
+async def restore_system(backup_dir: str):
+    """Restore the system from a backup"""
+    try:
+        # Load configuration
+        with open(f"{backup_dir}/config.json", "r") as f:
+            config = json.load(f)
+        
+        # Update global variables
+        global CHAT_MODEL, CODE_MODEL, MATH_MODEL, REASONING_MODEL, CREATIVE_MODEL
+        global MULTIMODAL_MODEL, TRANSLATION_MODEL, SUMMARIZATION_MODEL, CLASSIFICATION_MODEL
+        
+        CHAT_MODEL = config["models"]["chat"]
+        CODE_MODEL = config["models"]["code"]
+        MATH_MODEL = config["models"]["math"]
+        REASONING_MODEL = config["models"]["reasoning"]
+        CREATIVE_MODEL = config["models"]["creative"]
+        MULTIMODAL_MODEL = config["models"]["multimodal"]
+        TRANSLATION_MODEL = config["models"]["translation"]
+        SUMMARIZATION_MODEL = config["models"]["summarization"]
+        CLASSIFICATION_MODEL = config["models"]["classification"]
+        
+        # Restore episodic memory
+        if os.path.exists(f"{backup_dir}/episodic_memory.json"):
+            with open(f"{backup_dir}/episodic_memory.json", "r") as f:
+                memory_data = json.load(f)
+            
+            for episode in memory_data:
+                await episodic_memory.store_episode(episode)
+        
+        return {"status": "success", "message": "System restored successfully"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# Initialize system components
+async def initialize_system():
+    """Initialize all system components"""
+    global advanced_rag, multi_modal_fusion, reasoning_engine, tool_learner
+    global episodic_memory, model_cache, distributed_processor, adaptive_model_router
+    global ai_monitor, model_ab_test, cost_optimizer, federated_learning
+    global quantum_optimizer, self_improving_system
+    
+    try:
+        # Initialize advanced components
+        advanced_rag = AdvancedRAG()
+        multi_modal_fusion = MultiModalFusion()
+        reasoning_engine = ReasoningEngine()
+        tool_learner = ToolLearner()
+        episodic_memory = EpisodicMemory()
+        model_cache = ModelCache()
+        distributed_processor = DistributedProcessor()
+        adaptive_model_router = AdaptiveModelRouter()
+        ai_monitor = AIMonitor()
+        model_ab_test = ModelABTest()
+        cost_optimizer = CostOptimizer()
+        federated_learning = FederatedLearning()
+        quantum_optimizer = QuantumOptimizer()
+        self_improving_system = SelfImprovingSystem()
+        
+        logger.info("System components initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize system components: {e}")
+
+# Add startup event to initialize the system
+@app.on_event("startup")
+async def startup_event():
+    """Initialize the system on startup"""
+    await initialize_system()
+
+# Add shutdown event to clean up resources
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources on shutdown"""
+    try:
+        # Close vector database connections
+        for db in vector_databases.values():
+            if hasattr(db, 'close'):
+                db.close()
+        
+        # Close cache connection
+        if cache:
+            cache.close()
+        
+        # Close search index connection
+        if search_index:
+            search_index.close()
+        
+        logger.info("System shutdown completed")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+
+# Add middleware for request logging
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all requests"""
+    start_time = time.time()
+    
+    # Log request
+    logger.info(f"Request: {request.method} {request.url}")
+    
+    # Process request
+    response = await call_next(request)
+    
+    # Log response
+    process_time = time.time() - start_time
+    logger.info(f"Response: {response.status_code} in {process_time:.4f}s")
+    
+    return response
+
+# Add middleware for CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Add rate limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+@app.get("/rate-limited")
+@limiter.limit("100/minute")
+async def rate_limited_endpoint(request: Request):
+    """Example of a rate-limited endpoint"""
+    return {"message": "This endpoint is rate limited"}
+
+# Add authentication middleware (optional)
+async def verify_token(request: Request):
+    """Verify JWT token"""
+    token = request.headers.get("Authorization")
+    if not token:
+        raise HTTPException(status_code=401, detail="Token required")
+    
+    # In a real implementation, you would verify the JWT token
+    # For now, we'll just check if it exists
+    return True
+
+# Add authenticated endpoint
+@app.get("/protected")
+async def protected_endpoint(request: Request):
+    """Example of a protected endpoint"""
+    await verify_token(request)
+    return {"message": "This is a protected endpoint"}
+
+# Add WebSocket endpoint for real-time communication
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time communication"""
+    await websocket.accept()
+    
+    try:
+        while True:
+            # Receive message
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            
+            # Process message
+            if message["type"] == "ping":
+                await websocket.send_text(json.dumps({"type": "pong"}))
+            elif message["type"] == "request":
+                # Process the request
+                request = UniversalRequest(**message["data"])
+                response = await universal_endpoint(request)
+                
+                # Send response
+                if isinstance(response, StreamingResponse):
+                    # Handle streaming response
+                    async for chunk in response.body_iterator:
+                        await websocket.send_text(chunk)
+                else:
+                    await websocket.send_text(json.dumps(response.dict()))
+            else:
+                await websocket.send_text(json.dumps({"type": "error", "message": "Unknown message type"}))
+    
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        await websocket.send_text(json.dumps({"type": "error", "message": str(e)}))
+
+# Add GraphQL endpoint (optional)
+try:
+    from strawberry import Schema
+    from strawberry.fastapi import GraphQLRouter
+    
+    # Define GraphQL types
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def hello(self) -> str:
+            return "Hello World"
+        
+        @strawberry.field
+        def models(self) -> List[str]:
+            return [CHAT_MODEL, CODE_MODEL, MATH_MODEL, REASONING_MODEL, CREATIVE_MODEL, MULTIMODAL_MODEL]
+    
+    @strawberry.type
+    class Mutation:
+        @strawberry.mutation
+        def create_tool(self, task_description: str) -> str:
+            tool = asyncio.run(tool_learner.create_tool(task_description))
+            return json.dumps(tool)
+    
+    # Create GraphQL schema
+    schema = Schema(query=Query, mutation=Mutation)
+    
+    # Add GraphQL router
+    graphql_app = GraphQLRouter(schema)
+    app.include_router(graphql_app, prefix="/graphql")
+    
+    logger.info("GraphQL endpoint added")
+except ImportError:
+    logger.warning("Strawberry not installed, GraphQL endpoint not available")
+
+# Add gRPC endpoint (optional)
+try:
+    import grpc
+    from concurrent import futures
+    
+    # Define gRPC service
+    class AIServiceServicer(ai_service_pb2_grpc.AIServiceServicer):
+        async def ProcessRequest(self, request, context):
+            # Process the request
+            universal_request = UniversalRequest(
+                prompt=request.prompt,
+                context=request.context,
+                model=request.model,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens
+            )
+            
+            response = await universal_endpoint(universal_request)
+            
+            # Return gRPC response
+            return ai_service_pb2.AIResponse(
+                response=response.response,
+                model=response.model,
+                tokens_used=response.tokens_used,
+                processing_time=response.processing_time
+            )
+    
+    # Start gRPC server
+    def serve_grpc():
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+        ai_service_pb2_grpc.add_AIServiceServicer_to_server(AIServiceServicer(), server)
+        server.add_insecure_port('[::]:50051')
+        server.start()
+        server.wait_for_termination()
+    
+    # Run gRPC server in a separate thread
+    import threading
+    grpc_thread = threading.Thread(target=serve_grpc)
+    grpc_thread.daemon = True
+    grpc_thread.start()
+    
+    logger.info("gRPC server started on port 50051")
+except ImportError:
+    logger.warning("gRPC not installed, gRPC endpoint not available")
+
+# Add metrics endpoint for monitoring
+@app.get("/metrics")
+async def metrics():
+    """Get system metrics"""
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "uptime": time.time() - start_time if 'start_time' in globals() else 0,
+        "memory_usage": psutil.virtual_memory().percent,
+        "cpu_usage": psutil.cpu_percent(),
+        "disk_usage": psutil.disk_usage('/').percent,
+        "active_connections": len(active_connections) if 'active_connections' in globals() else 0,
+        "cache_hit_rate": cache.get_stats().get("hits", 0) / max(cache.get_stats().get("total", 1), 1) if cache else 0
+    }
+
+# Add documentation endpoint
+@app.get("/docs/custom")
+async def custom_docs():
+    """Custom documentation endpoint"""
+    return {
+        "title": "Advanced AI System API",
+        "description": "A comprehensive AI system with multiple models and capabilities",
+        "version": "1.0.0",
+        "endpoints": {
+            "/universal": "Universal endpoint for all AI tasks",
+            "/chat": "Chat with the AI",
+            "/code": "Generate code",
+            "/math": "Solve math problems",
+            "/reason": "Chain-of-thought reasoning",
+            "/translate": "Translate text",
+            "/summarize": "Summarize text",
+            "/classify": "Classify text",
+            "/image/analyze": "Analyze images",
+            "/audio/transcribe": "Transcribe audio",
+            "/video/analyze": "Analyze videos",
+            "/data/analyze": "Analyze data",
+            "/data/visualize": "Visualize data",
+            "/rag": "Retrieve-augmented generation",
+            "/tool/create": "Create a new tool",
+            "/memory/store": "Store in episodic memory",
+            "/distributed/process": "Process tasks distributedly",
+            "/model/select": "Select the best model",
+            "/optimize/cost": "Get cost optimizations",
+            "/quantum/optimize": "Quantum optimization",
+            "/self_improve": "Trigger self-improvement",
+            "/health/comprehensive": "Comprehensive health check",
+            "/capabilities": "Get system capabilities",
+            "/benchmark": "Benchmark the system",
+            "/system/reload": "Reload the system",
+            "/system/backup": "Create a backup",
+            "/system/restore": "Restore from backup",
+            "/metrics": "Get system metrics",
+            "/ws": "WebSocket endpoint",
+            "/graphql": "GraphQL endpoint",
+            "/grpc": "gRPC endpoint (port 50051)"
+        }
+    }
+
 # Run the app
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import psutil
+    
+    # Record start time
+    start_time = time.time()
+    
+    # Get system info
+    cpu_count = psutil.cpu_count()
+    memory_gb = psutil.virtual_memory().total / (1024**3)
+    
+    print(f"""
+    ╔══════════════════════════════════════════════════════════════╗
+    ║                Advanced AI System Started                     ║
+    ╠══════════════════════════════════════════════════════════════╣
+    ║  System Info:                                                 ║
+    ║    - CPU Cores: {cpu_count:<46} ║
+    ║    - Memory: {memory_gb:.1f} GB{'':<42} ║
+    ║    - Models: {len([CHAT_MODEL, CODE_MODEL, MATH_MODEL, REASONING_MODEL, CREATIVE_MODEL, MULTIMODAL_MODEL]):<44} ║
+    ║    - Tools: {len(tools):<46} ║
+    ║    - Vector DBs: {len(vector_databases):<42} ║
+    ║                                                                ║
+    ║  Endpoints:                                                   ║
+    ║    - HTTP API: http://localhost:8000                         ║
+    ║    - WebSocket: ws://localhost:8000/ws                      ║
+    ║    - GraphQL: http://localhost:8000/graphql                  ║
+    ║    - gRPC: localhost:50051                                   ║
+    ║                                                                ║
+    ║  Documentation:                                               ║
+    ║    - Swagger: http://localhost:8000/docs                     ║
+    ║    - ReDoc: http://localhost:8000/redoc                      ║
+    ║    - Custom: http://localhost:8000/docs/custom              ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """)
+    
+    # Run the server
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info",
+        access_log=True
+    )
