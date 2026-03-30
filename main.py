@@ -4335,6 +4335,1405 @@ async def comprehensive_health_check():
     
     return health_status
 
+# Replace your existing /ask/universal endpoint with this enhanced version
+
+@app.post("/ask/universal")
+async def ask_universal(
+    request: Request,
+    response: Response,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    try:
+        body = await request.json()
+        prompt = (body.get("prompt") or "").strip()
+        conversation_id = body.get("conversation_id")
+        files = body.get("files", [])
+        stream = body.get("stream", True)
+        
+        # Additional options from body
+        output_type = body.get("output_type", "text")  # text, code, image, audio, video, json, markdown
+        language = body.get("language")  # For code tasks
+        target_language = body.get("target_language")  # For translation
+        image_style = body.get("image_style")  # realistic, anime, etc
+        image_size = body.get("image_size", "1024x1024")
+        voice = body.get("voice", "alloy")  # For TTS
+        enable_cot = body.get("enable_cot", False)  # Chain of thought
+        enable_rag = body.get("enable_rag", False)  # RAG mode
+        temperature = body.get("temperature", 0.7)
+        max_tokens = body.get("max_tokens", 4096)
+        system_prompt = body.get("system_prompt")
+        execute_code = body.get("execute_code", False)  # Run generated code
+        context = body.get("context")  # Additional context
+        documents = body.get("documents", [])  # Base64 docs or URLs
+
+        if not prompt and not files and not documents:
+            raise HTTPException(status_code=400, detail="prompt, files, or documents required")
+
+        # -------------------------
+        # USER / SESSION
+        # -------------------------
+        identity = current_user or {}
+        user_id = identity.get("id") or request.cookies.get("guest_id") or str(uuid.uuid4())
+
+        if not identity.get("id") and not request.cookies.get("guest_id"):
+            response.set_cookie(
+                key="guest_id",
+                value=user_id,
+                httponly=True,
+                secure=True,
+                samesite="lax",
+                max_age=60 * 60 * 24 * 7
+            )
+
+        if not conversation_id:
+            conversation_id = str(uuid.uuid4())
+
+        # -------------------------
+        # SAVE / UPSERT CONVERSATION
+        # -------------------------
+        await asyncio.to_thread(
+            lambda: supabase.table("conversations").upsert({
+                "id": conversation_id,
+                "user_id": user_id,
+                "created_at": datetime.utcnow().isoformat()
+            }).execute()
+        )
+
+        # -------------------------
+        # LOAD HISTORY
+        # -------------------------
+        history_res = await asyncio.to_thread(
+            lambda: supabase.table("messages")
+            .select("role, content")
+            .eq("conversation_id", conversation_id)
+            .order("created_at")
+            .limit(20)
+            .execute()
+        )
+        history_messages = history_res.data or []
+
+        # -------------------------
+        # INTENT DETECTION (FIXED)
+        # -------------------------
+        detected_intent, confidence = detect_intent(prompt)
+        logger.info(f"Detected intent: {detected_intent} (Confidence: {confidence})")
+
+        # -------------------------
+        # OVERRIDE INTENT BASED ON EXPLICIT PARAMS
+        # -------------------------
+        if output_type == "image" and detected_intent != "image_generation":
+            detected_intent = "image_generation"
+        elif output_type == "audio" and detected_intent != "text_to_speech":
+            detected_intent = "text_to_speech"
+        elif output_type == "video" and detected_intent not in ["video_generation", "img2vid"]:
+            if files:
+                detected_intent = "img2vid"
+            else:
+                detected_intent = "video_generation"
+        elif output_type == "code":
+            detected_intent = "code_generation"
+        elif target_language:
+            detected_intent = "translation"
+        elif enable_rag:
+            detected_intent = "rag_query"
+        elif enable_cot and detected_intent == "chat":
+            detected_intent = "reasoning"
+        elif execute_code:
+            detected_intent = "code_execution"
+        elif documents and not prompt:
+            detected_intent = "document_analysis"
+
+        # -------------------------
+        # IMAGE GENERATION
+        # -------------------------
+        if detected_intent == "image_generation":
+            # Pass style and size to handler
+            result = await image_generation_handler(
+                prompt, 
+                user_id, 
+                stream,
+                style=image_style,
+                size=image_size
+            )
+            return result
+
+        # -------------------------
+        # VIDEO GENERATION
+        # -------------------------
+        elif detected_intent == "video_generation":
+            if stream:
+                async def event_generator():
+                    yield sse({"type": "starting", "message": "Generating video..."})
+                    try:
+                        result = await generate_video_internal(prompt, samples=1, user_id=user_id)
+                        yield sse({
+                            "type": "videos",
+                            "provider": result.get("provider"),
+                            "videos": result.get("videos", [])
+                        })
+                        yield sse({"type": "done"})
+                    except Exception as e:
+                        logger.error(f"Video generation failed: {e}")
+                        yield sse({"type": "error", "message": str(e)})
+                return StreamingResponse(
+                    event_generator(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no"
+                    }
+                )
+            else:
+                return await generate_video_internal(prompt, samples=1, user_id=user_id)
+
+        # -------------------------
+        # VISION / IMAGE ANALYSIS
+        # -------------------------
+        elif detected_intent == "vision_analysis" and files:
+            if not files[0].get("url"):
+                raise HTTPException(400, "No valid image file provided")
+            image_url = files[0]["url"]
+
+            async def process_vision():
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(image_url)
+                    resp.raise_for_status()
+                    image_bytes = resp.content
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    tmp.write(image_bytes)
+                    temp_path = tmp.name
+                try:
+                    with open(temp_path, "rb") as f:
+                        upload = UploadFile(filename="image.png", file=f)
+                        return await vision_analyze(request, upload)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+
+            return await process_vision()
+
+        # -------------------------
+        # IMG2VID
+        # -------------------------
+        elif detected_intent == "img2vid" and files:
+            image_url = files[0].get("url")
+            if not image_url:
+                raise HTTPException(400, "Invalid image URL")
+
+            async def process():
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(image_url)
+                    resp.raise_for_status()
+                    image_bytes = resp.content
+                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                    tmp.write(image_bytes)
+                    temp_path = tmp.name
+                try:
+                    with open(temp_path, "rb") as f:
+                        upload = UploadFile(filename="image.png", file=f)
+                        return await img2vid(request, upload, prompt, 4)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+
+            return await process()
+
+        # -------------------------
+        # MATH
+        # -------------------------
+        elif detected_intent == "math_calculation":
+            if enable_cot:
+                # Enhanced math with step-by-step reasoning
+                return await solve_math_with_reasoning(prompt, user_id, conversation_id, stream)
+            return await solve_math(prompt)
+
+        # -------------------------
+        # JOKE
+        # -------------------------
+        elif detected_intent == "joke":
+            return await tell_joke("general")
+
+        # -------------------------
+        # CODE GENERATION
+        # -------------------------
+        elif detected_intent == "code_generation":
+            lang = language or detect_language(prompt)
+            code_system_prompt = system_prompt or """You are an expert programmer. Generate clean, efficient, and well-documented code.
+Include:
+1. Clear comments explaining the logic
+2. Type hints where applicable
+3. Error handling
+4. Example usage if helpful
+
+Return ONLY the code in a code block, no extra explanation."""
+            
+            code_prompt = f"Write a {lang} program for: {prompt}"
+            if context:
+                code_prompt = f"Context: {context}\n\n{code_prompt}"
+            
+            payload = {
+                "model": CODE_MODEL,
+                "messages": [
+                    {"role": "system", "content": code_system_prompt},
+                    {"role": "user", "content": code_prompt}
+                ],
+                "max_tokens": max_tokens,
+                "temperature": temperature
+            }
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=get_groq_headers(),
+                    json=payload
+                )
+                r.raise_for_status()
+                code = r.json()["choices"][0]["message"]["content"]
+            return {"language": lang, "code": code}
+
+        # -------------------------
+        # CODE EXECUTION (NEW)
+        # -------------------------
+        elif detected_intent == "code_execution":
+            lang = language or detect_language(prompt)
+            
+            async def event_generator():
+                try:
+                    yield sse({"type": "status", "status": "generating"})
+                    
+                    # Generate code first
+                    code_system_prompt = system_prompt or """You are an expert programmer. Generate code that can be executed.
+Return ONLY the code in a code block, no explanation."""
+                    
+                    code_prompt = f"Write executable {lang} code for: {prompt}"
+                    if context:
+                        code_prompt = f"Context:\n```\n{context}\n```\n\n{code_prompt}"
+                    
+                    payload = {
+                        "model": CODE_MODEL,
+                        "messages": [
+                            {"role": "system", "content": code_system_prompt},
+                            {"role": "user", "content": code_prompt}
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature
+                    }
+                    async with httpx.AsyncClient(timeout=60) as client:
+                        r = await client.post(
+                            "https://api.groq.com/openai/v1/chat/completions",
+                            headers=get_groq_headers(),
+                            json=payload
+                        )
+                        r.raise_for_status()
+                        code = r.json()["choices"][0]["message"]["content"]
+                    
+                    # Extract code from markdown
+                    code_match = re.search(r"```(?:\w+)?\n(.*?)```", code, re.DOTALL)
+                    if code_match:
+                        code = code_match.group(1)
+                    
+                    yield sse({"type": "code", "language": lang, "code": code})
+                    yield sse({"type": "status", "status": "executing"})
+                    
+                    # Execute code using Judge0
+                    lang_id = JUDGE0_LANGUAGES.get(lang.lower(), JUDGE0_LANGUAGES.get("python", 71))
+                    
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        submit_resp = await client.post(
+                            f"{JUDGE0_URL}/submissions",
+                            headers={
+                                "X-RapidAPI-Key": JUDGE0_KEY,
+                                "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com",
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "source_code": code,
+                                "language_id": lang_id,
+                                "stdin": ""
+                            }
+                        )
+                        submission = submit_resp.json()
+                        token = submission["token"]
+                        
+                        # Poll for result
+                        await asyncio.sleep(2)
+                        for _ in range(10):
+                            result_resp = await client.get(
+                                f"{JUDGE0_URL}/submissions/{token}",
+                                headers={
+                                    "X-RapidAPI-Key": JUDGE0_KEY,
+                                    "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com"
+                                }
+                            )
+                            result = result_resp.json()
+                            status_id = result.get("status", {}).get("id", 0)
+                            
+                            if status_id in [1, 2]:  # Processing
+                                await asyncio.sleep(1)
+                                continue
+                            
+                            output = result.get("stdout", "") or result.get("stderr", "No output")
+                            exit_code = result.get("status", {}).get("id", -1)
+                            
+                            yield sse({
+                                "type": "execution",
+                                "exit_code": exit_code,
+                                "output": output,
+                                "memory": result.get("memory"),
+                                "time": result.get("time")
+                            })
+                            break
+                    
+                    yield sse({"type": "done"})
+                    
+                except Exception as e:
+                    logger.error(f"Code execution failed: {e}")
+                    yield sse({"type": "error", "message": str(e)})
+
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+
+        # -------------------------
+        # SEARCH
+        # -------------------------
+        elif detected_intent == "web_search":
+            query = prompt
+            for prefix in ["search for", "look up", "find", "google", "search"]:
+                if prefix in prompt.lower():
+                    query = prompt.lower().split(prefix, 1)[1].strip()
+                    break
+            
+            # Enhanced search with AI summary
+            if stream:
+                async def event_generator():
+                    try:
+                        yield sse({"type": "status", "status": "searching"})
+                        search_results = await duckduckgo_search(query)
+                        yield sse({"type": "search_results", "results": search_results})
+                        
+                        # Summarize results with AI
+                        yield sse({"type": "status", "status": "summarizing"})
+                        summary_prompt = f"""Based on these search results, provide a comprehensive answer to: {query}
+
+Search Results:
+{json.dumps(search_results, indent=2)}
+
+Provide a clear, informative answer with sources cited."""
+                        
+                        payload = {
+                            "model": CHAT_MODEL,
+                            "messages": [{"role": "user", "content": summary_prompt}],
+                            "max_tokens": 2048,
+                            "temperature": 0.3
+                        }
+                        async with httpx.AsyncClient(timeout=60) as client:
+                            r = await client.post(
+                                "https://api.groq.com/openai/v1/chat/completions",
+                                headers=get_groq_headers(),
+                                json=payload
+                            )
+                            r.raise_for_status()
+                            summary = r.json()["choices"][0]["message"]["content"]
+                        
+                        for char in summary:
+                            yield sse({"type": "token", "text": char})
+                            await asyncio.sleep(0.005)
+                        
+                        yield sse({"type": "done"})
+                    except Exception as e:
+                        logger.error(f"Enhanced search failed: {e}")
+                        yield sse({"type": "error", "message": str(e)})
+                
+                return StreamingResponse(
+                    event_generator(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no"
+                    }
+                )
+            else:
+                return await duckduckgo_search(query)
+
+        # -------------------------
+        # TTS
+        # -------------------------
+        elif detected_intent == "text_to_speech":
+            text = prompt
+            
+            # Try ElevenLabs first for better quality
+            if ELEVENLABS_API_KEY:
+                try:
+                    voice_id = get_elevenlabs_voice_id(voice)
+                    async with httpx.AsyncClient(timeout=60) as client:
+                        r = await client.post(
+                            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                            headers={
+                                "xi-api-key": ELEVENLABS_API_KEY,
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "text": text,
+                                "model_id": "eleven_multilingual_v2",
+                                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
+                            }
+                        )
+                        r.raise_for_status()
+                        audio_b64 = base64.b64encode(r.content).decode()
+                    return {"text": text, "audio": audio_b64, "provider": "elevenlabs"}
+                except Exception as e:
+                    logger.warning(f"ElevenLabs TTS failed, falling back to OpenAI: {e}")
+            
+            # Fallback to OpenAI
+            if OPENAI_API_KEY:
+                headers = {
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json"
+                }
+                payload = {"model": "tts-1", "voice": voice, "input": text}
+                async with httpx.AsyncClient(timeout=60) as client:
+                    r = await client.post(
+                        "https://api.openai.com/v1/audio/speech",
+                        headers=headers,
+                        json=payload
+                    )
+                    r.raise_for_status()
+                    audio_b64 = base64.b64encode(r.content).decode()
+                return {"text": text, "audio": audio_b64, "provider": "openai"}
+            
+            raise HTTPException(500, "No TTS provider available")
+
+        # -------------------------
+        # STT / AUDIO TRANSCRIPTION (NEW)
+        # -------------------------
+        elif detected_intent == "audio_transcription" and files:
+            if not files[0].get("url"):
+                raise HTTPException(400, "No valid audio file provided")
+            
+            audio_url = files[0]["url"]
+            
+            async def process_transcription():
+                # Download audio
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.get(audio_url)
+                    resp.raise_for_status()
+                    audio_bytes = resp.content
+                
+                # Save to temp file
+                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+                    tmp.write(audio_bytes)
+                    temp_path = tmp.name
+                
+                try:
+                    # Use OpenAI Whisper
+                    if OPENAI_API_KEY:
+                        async with httpx.AsyncClient(timeout=120) as client:
+                            with open(temp_path, "rb") as f:
+                                r = await client.post(
+                                    "https://api.openai.com/v1/audio/transcriptions",
+                                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                                    files={"file": (f"audio.mp3", f)},
+                                    data={"model": "whisper-1"}
+                                )
+                            r.raise_for_status()
+                            transcription = r.json()["text"]
+                    else:
+                        # Fallback to local whisper
+                        import whisper
+                        model = whisper.load_model("base")
+                        result = model.transcribe(temp_path)
+                        transcription = result["text"]
+                    
+                    return {"transcription": transcription, "provider": "openai" if OPENAI_API_KEY else "local"}
+                finally:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+            
+            return await process_transcription()
+
+        # -------------------------
+        # TRANSLATION (NEW)
+        # -------------------------
+        elif detected_intent == "translation":
+            text_to_translate = prompt
+            # Extract text if prefixed with language instruction
+            lang_patterns = [
+                r"translate.*?to\s+(\w+):\s*(.+)",
+                r"in\s+(\w+):\s*(.+)",
+                r"to\s+(\w+):\s*(.+)"
+            ]
+            for pattern in lang_patterns:
+                match = re.search(pattern, prompt, re.IGNORECASE)
+                if match:
+                    target_language = target_language or match.group(1)
+                    text_to_translate = match.group(2)
+                    break
+            
+            if not target_language:
+                # Try to detect from common phrases
+                for lang in ["spanish", "french", "german", "japanese", "chinese", "korean", "italian", "portuguese", "russian", "arabic", "hindi"]:
+                    if lang in prompt.lower():
+                        target_language = lang
+                        # Remove the language instruction
+                        text_to_translate = re.sub(r"(translate|in|to)\s+" + lang + r"[:\s]*", "", prompt, flags=re.IGNORECASE).strip()
+                        break
+            
+            translation_prompt = f"""Translate the following text to {target_language}. 
+Preserve the tone, style, and formatting. Return ONLY the translation.
+
+Text: {text_to_translate}"""
+            
+            payload = {
+                "model": CHAT_MODEL,
+                "messages": [{"role": "user", "content": translation_prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.3
+            }
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=get_groq_headers(),
+                    json=payload
+                )
+                r.raise_for_status()
+                translated_text = r.json()["choices"][0]["message"]["content"]
+            
+            return {
+                "original": text_to_translate,
+                "translated": translated_text,
+                "target_language": target_language
+            }
+
+        # -------------------------
+        # SUMMARIZATION (NEW)
+        # -------------------------
+        elif detected_intent == "summarization":
+            text_to_summarize = prompt
+            
+            # Determine summary length
+            length_instruction = "in a concise paragraph"
+            if "brief" in prompt.lower() or "short" in prompt.lower() or "tldr" in prompt.lower():
+                length_instruction = "in 1-2 sentences"
+            elif "detailed" in prompt.lower() or "long" in prompt.lower() or "comprehensive" in prompt.lower():
+                length_instruction = "in detail with all key points"
+            
+            # Extract text if prefixed
+            summarize_match = re.search(r"summarize[:\s]*(.+)", prompt, re.IGNORECASE)
+            if summarize_match:
+                text_to_summarize = summarize_match.group(1).strip()
+            
+            # Add document content if provided
+            if documents:
+                doc_texts = []
+                for doc in documents:
+                    doc_text = await extract_document_text(doc)
+                    doc_texts.append(doc_text)
+                if doc_texts:
+                    text_to_summarize = "\n\n".join(doc_texts) + "\n\n" + text_to_summarize
+            
+            summary_prompt = f"""Summarize the following {length_instruction}:
+
+{text_to_summarize}
+
+Provide a clear, well-structured summary capturing all key points."""
+            
+            payload = {
+                "model": CHAT_MODEL,
+                "messages": [{"role": "user", "content": summary_prompt}],
+                "max_tokens": max_tokens,
+                "temperature": 0.3
+            }
+            async with httpx.AsyncClient(timeout=60) as client:
+                r = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=get_groq_headers(),
+                    json=payload
+                )
+                r.raise_for_status()
+                summary = r.json()["choices"][0]["message"]["content"]
+            
+            return {"summary": summary}
+
+        # -------------------------
+        # REASONING / COT (NEW)
+        # -------------------------
+        elif detected_intent == "reasoning":
+            reasoning_system = system_prompt or """You are an expert reasoner. Think through problems systematically:
+1. Identify key components and constraints
+2. Break down the problem into steps
+3. Analyze relationships and dependencies
+4. Consider multiple perspectives
+5. Draw logical conclusions
+6. Verify your reasoning
+
+Use clear step-by-step formatting."""
+            
+            full_prompt = prompt
+            if context:
+                full_prompt = f"Context: {context}\n\n{full_prompt}"
+            
+            if stream:
+                async def event_generator():
+                    try:
+                        yield sse({"type": "status", "status": "thinking"})
+                        
+                        messages = [{"role": "system", "content": reasoning_system}]
+                        messages.extend(history_messages[-6:])  # Include some history
+                        messages.append({"role": "user", "content": f"Think step by step:\n\n{full_prompt}"})
+                        
+                        payload = {
+                            "model": REASONING_MODEL if REASONING_MODEL != "gpt-4o" else CHAT_MODEL,
+                            "messages": messages,
+                            "max_tokens": max_tokens,
+                            "temperature": 0.5
+                        }
+                        
+                        async with httpx.AsyncClient(timeout=120) as client:
+                            async with client.stream(
+                                "POST",
+                                "https://api.groq.com/openai/v1/chat/completions",
+                                headers=get_groq_headers(),
+                                json={**payload, "stream": True}
+                            ) as response:
+                                async for line in response.aiter_lines():
+                                    if line.startswith("data: ") and line != "data: [DONE]":
+                                        try:
+                                            data = json.loads(line[6:])
+                                            content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                            if content:
+                                                yield sse({"type": "token", "text": content})
+                                        except:
+                                            pass
+                        
+                        yield sse({"type": "done"})
+                    except Exception as e:
+                        logger.error(f"Reasoning failed: {e}")
+                        yield sse({"type": "error", "message": str(e)})
+                
+                return StreamingResponse(
+                    event_generator(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no"
+                    }
+                )
+            else:
+                messages = [{"role": "system", "content": reasoning_system}]
+                messages.append({"role": "user", "content": f"Think step by step:\n\n{full_prompt}"})
+                
+                payload = {
+                    "model": CHAT_MODEL,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.5
+                }
+                async with httpx.AsyncClient(timeout=120) as client:
+                    r = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=get_groq_headers(),
+                        json=payload
+                    )
+                    r.raise_for_status()
+                    reasoning_response = r.json()["choices"][0]["message"]["content"]
+                
+                return {"reasoning": reasoning_response}
+
+        # -------------------------
+        # RAG QUERY (NEW)
+        # -------------------------
+        elif detected_intent == "rag_query":
+            try:
+                # Use advanced RAG if available
+                rag_response = await advanced_rag.retrieve_and_generate(prompt)
+                return {"response": rag_response, "source": "rag"}
+            except Exception as e:
+                logger.warning(f"RAG failed, falling back to chat: {e}")
+                # Fall through to regular chat
+
+        # -------------------------
+        # DOCUMENT ANALYSIS (NEW)
+        # -------------------------
+        elif detected_intent == "document_analysis":
+            if not documents:
+                raise HTTPException(400, "No documents provided")
+            
+            doc_texts = []
+            for doc in documents:
+                doc_text = await extract_document_text(doc)
+                doc_texts.append(doc_text)
+            
+            combined_text = "\n\n---\n\n".join(doc_texts)
+            
+            analysis_prompt = f"""Analyze the following document(s):
+
+{combined_text}
+
+User question: {prompt if prompt else "Provide a comprehensive summary and analysis of this document."}
+
+Provide a thorough analysis covering:
+- Key points and main arguments
+- Important details and data
+- Structure and organization
+- Any notable findings or conclusions"""
+
+            if stream:
+                async def event_generator():
+                    try:
+                        yield sse({"type": "status", "status": "analyzing"})
+                        
+                        payload = {
+                            "model": CHAT_MODEL,
+                            "messages": [{"role": "user", "content": analysis_prompt}],
+                            "max_tokens": max_tokens,
+                            "temperature": 0.3
+                        }
+                        
+                        async with httpx.AsyncClient(timeout=120) as client:
+                            async with client.stream(
+                                "POST",
+                                "https://api.groq.com/openai/v1/chat/completions",
+                                headers=get_groq_headers(),
+                                json={**payload, "stream": True}
+                            ) as response:
+                                async for line in response.aiter_lines():
+                                    if line.startswith("data: ") and line != "data: [DONE]":
+                                        try:
+                                            data = json.loads(line[6:])
+                                            content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                            if content:
+                                                yield sse({"type": "token", "text": content})
+                                        except:
+                                            pass
+                        
+                        yield sse({"type": "done"})
+                    except Exception as e:
+                        logger.error(f"Document analysis failed: {e}")
+                        yield sse({"type": "error", "message": str(e)})
+                
+                return StreamingResponse(
+                    event_generator(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no"
+                    }
+                )
+            else:
+                payload = {
+                    "model": CHAT_MODEL,
+                    "messages": [{"role": "user", "content": analysis_prompt}],
+                    "max_tokens": max_tokens,
+                    "temperature": 0.3
+                }
+                async with httpx.AsyncClient(timeout=120) as client:
+                    r = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=get_groq_headers(),
+                        json=payload
+                    )
+                    r.raise_for_status()
+                    analysis = r.json()["choices"][0]["message"]["content"]
+                
+                return {"analysis": analysis}
+
+        # -------------------------
+        # CREATIVE WRITING (NEW)
+        # -------------------------
+        elif detected_intent == "creative_writing":
+            creative_system = system_prompt or """You are a creative writer. Produce engaging, original content with:
+- Vivid descriptions and sensory details
+- Compelling narratives and characters
+- Unique perspectives and ideas
+- Emotional depth and resonance
+- Proper structure and pacing
+
+Be imaginative and avoid clichés."""
+            
+            messages = [{"role": "system", "content": creative_system}]
+            messages.extend(history_messages[-4:])  # Some context
+            messages.append({"role": "user", "content": prompt})
+            
+            if stream:
+                async def event_generator():
+                    try:
+                        yield sse({"type": "status", "status": "writing"})
+                        
+                        payload = {
+                            "model": CREATIVE_MODEL if CREATIVE_MODEL != "claude-3-opus" else CHAT_MODEL,
+                            "messages": messages,
+                            "max_tokens": max_tokens,
+                            "temperature": 0.9  # Higher temperature for creativity
+                        }
+                        
+                        async with httpx.AsyncClient(timeout=120) as client:
+                            async with client.stream(
+                                "POST",
+                                "https://api.groq.com/openai/v1/chat/completions",
+                                headers=get_groq_headers(),
+                                json={**payload, "stream": True}
+                            ) as response:
+                                async for line in response.aiter_lines():
+                                    if line.startswith("data: ") and line != "data: [DONE]":
+                                        try:
+                                            data = json.loads(line[6:])
+                                            content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                            if content:
+                                                yield sse({"type": "token", "text": content})
+                                        except:
+                                            pass
+                        
+                        yield sse({"type": "done"})
+                    except Exception as e:
+                        logger.error(f"Creative writing failed: {e}")
+                        yield sse({"type": "error", "message": str(e)})
+                
+                return StreamingResponse(
+                    event_generator(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no"
+                    }
+                )
+            else:
+                payload = {
+                    "model": CHAT_MODEL,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.9
+                }
+                async with httpx.AsyncClient(timeout=120) as client:
+                    r = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=get_groq_headers(),
+                        json=payload
+                    )
+                    r.raise_for_status()
+                    creative_response = r.json()["choices"][0]["message"]["content"]
+                
+                return {"content": creative_response}
+
+        # -------------------------
+        # MULTIMODAL (IMAGE + TEXT) (NEW)
+        # -------------------------
+        elif detected_intent == "multimodal" and files:
+            if not files[0].get("url"):
+                raise HTTPException(400, "No valid file provided")
+            
+            image_url = files[0]["url"]
+            
+            # Use OpenAI GPT-4V for multimodal
+            if OPENAI_API_KEY:
+                async def event_generator():
+                    try:
+                        yield sse({"type": "status", "status": "analyzing"})
+                        
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {"type": "image_url", "image_url": {"url": image_url}}
+                                ]
+                            }
+                        ]
+                        
+                        payload = {
+                            "model": "gpt-4-vision-preview",
+                            "messages": messages,
+                            "max_tokens": max_tokens
+                        }
+                        
+                        async with httpx.AsyncClient(timeout=120) as client:
+                            async with client.stream(
+                                "POST",
+                                "https://api.openai.com/v1/chat/completions",
+                                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+                                json={**payload, "stream": True}
+                            ) as response:
+                                async for line in response.aiter_lines():
+                                    if line.startswith("data: ") and line != "data: [DONE]":
+                                        try:
+                                            data = json.loads(line[6:])
+                                            content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                            if content:
+                                                yield sse({"type": "token", "text": content})
+                                        except:
+                                            pass
+                        
+                        yield sse({"type": "done"})
+                    except Exception as e:
+                        logger.error(f"Multimodal failed: {e}")
+                        yield sse({"type": "error", "message": str(e)})
+                
+                return StreamingResponse(
+                    event_generator(),
+                    media_type="text/event-stream",
+                    headers={
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                        "X-Accel-Buffering": "no"
+                    }
+                )
+            else:
+                raise HTTPException(500, "Multimodal requires OpenAI API key")
+
+        # -------------------------
+        # CHAT (DEFAULT STREAMING)
+        # -------------------------
+        else:
+            async def event_generator():
+                try:
+                    yield f"data: {json.dumps({'type': 'status', 'status': 'thinking'})}\n\n"
+                    
+                    # Build messages with optional context and documents
+                    messages = []
+                    
+                    if system_prompt:
+                        messages.append({"role": "system", "content": system_prompt})
+                    
+                    # Add context if provided
+                    if context:
+                        messages.append({"role": "system", "content": f"Additional context: {context}"})
+                    
+                    # Add document content if provided
+                    if documents:
+                        doc_texts = []
+                        for doc in documents:
+                            doc_text = await extract_document_text(doc)
+                            doc_texts.append(doc_text)
+                        if doc_texts:
+                            messages.append({
+                                "role": "system", 
+                                "content": f"Reference documents:\n{chr(10).join(doc_texts)}"
+                            })
+                    
+                    messages.extend(history_messages)
+                    messages.append({"role": "user", "content": prompt})
+                    
+                    # Use chat_with_tools for enhanced chat
+                    reply = await chat_with_tools(user_id, messages)
+                    
+                    for char in reply:
+                        yield f"data: {json.dumps({'type': 'token', 'text': char})}\n\n"
+                        await asyncio.sleep(0.005)
+                    
+                    # Save to database
+                    await asyncio.to_thread(
+                        lambda: supabase.table("messages").insert({
+                            "id": str(uuid.uuid4()),
+                            "conversation_id": conversation_id,
+                            "user_id": user_id,
+                            "role": "assistant",
+                            "content": reply,
+                            "created_at": datetime.utcnow().isoformat()
+                        }).execute()
+                    )
+                    
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    
+                except Exception as e:
+                    logger.error(f"Chat streaming failed: {e}")
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"/ask/universal failed: {e}")
+        raise HTTPException(500, f"Internal error: {e}")
+
+
+# ==================== HELPER FUNCTIONS ====================
+
+def detect_language(prompt: str) -> str:
+    """Detect programming language from prompt"""
+    language_map = {
+        "python": ["python", "py", "django", "flask", "pandas", "numpy"],
+        "javascript": ["javascript", "js", "node", "react", "vue", "angular", "typescript", "ts"],
+        "java": ["java", "spring", "maven"],
+        "cpp": ["c++", "cpp", "cplusplus", "clang"],
+        "c": ["c programming", "c code"],
+        "csharp": ["c#", "csharp", ".net", "unity"],
+        "go": ["golang", "go lang", "go code"],
+        "rust": ["rust", "rustlang"],
+        "ruby": ["ruby", "rails"],
+        "php": ["php", "laravel"],
+        "swift": ["swift", "ios", "xcode"],
+        "kotlin": ["kotlin", "android"],
+        "sql": ["sql", "mysql", "postgres", "query", "database"],
+        "html": ["html", "css", "webpage"],
+        "bash": ["bash", "shell", "terminal", "linux"],
+        "r": ["r language", "r code", "rstudio"],
+    }
+    
+    prompt_lower = prompt.lower()
+    for lang, keywords in language_map.items():
+        for keyword in keywords:
+            if keyword in prompt_lower:
+                return lang
+    
+    return "python"  # Default
+
+
+def get_elevenlabs_voice_id(voice_name: str) -> str:
+    """Get ElevenLabs voice ID from name"""
+    voice_map = {
+        "alloy": "21m00Tcm4TlvDq8ikWAM",
+        "rachel": "21m00Tcm4TlvDq8ikWAM",
+        "adam": "pNInz6obpgDQGcFmaJgB",
+        "antoni": "ErXwobaYiN019PkySvjV",
+        "arnold": "VR6AewLTigWG4xSOukaG",
+        "bella": "EXAVITQu4vr4xnSDxMaL",
+        "callum": "yoZ06aMxZJJ28mfd3POQ",
+        "charlotte": "XB0fDUnXU5powFXDhCwa",
+        "chris": "iP95p4xoKVk53GoZ742B",
+        "daniel": "onwK4e9ZLuTAKqWW03F9",
+        "dave": "jBpfuIE2acCO8z3wKNLl",
+        "emily": "LcfcDJNUP1GQjkzn1rUU",
+        "ethan": "nPczCjzI2devNBz1zQrb",
+        "finn": "TxGEqnHWrfWFTfGW9XjX",
+        "freya": "bIHbv24MWmeRgasZH58o",
+        "gigi": "jJpDqS7YVF6xIuA0KwfN",
+        "giovanni": "nPczCjzI2devNBz1zQrb",
+        "glinda": "zHiCjKGHJyRqrmT6aGxE",
+        "grace": "oWAxZDx7w5VEj9dCyTzz",
+        "harry": "SOYHLrjzK2X1ezoPC6cr",
+        "isabella": "shZiVhG4XHYAjsHBh7u5",
+        "james": "eNl5vS1w2URm existing",
+        "jenny": "SAz9YHcvj6GT2YYXdXww",
+        "lily": "oWAxZDx7w5VEj9dCyTzz",
+        "matilda": "z9fAnlkpzviPz8aXSZvX",
+        "matthew": "t0jbNlBVypJ9MV6PijRR",
+        "michael": "jBpfuIE2acCO8z3wKNLl",
+        "nancy": "AZnzlk1XvdvUeBnXmlld",
+        "orus": "x5qhH8qGTe5URMxS1iNi",
+        "patrick": "1Xf8gl9LhaTgMJXaaYgI",
+        "river": "pNInz6obpgDQGcFmaJgB",
+        "sam": "yoZ06aMxZJJ28mfd3POQ",
+        "serena": "5MsMjLGBy0K2RgWHDEsX",
+        "shimmer": "TEv7Q5Z5WXI1acAMyB0a",
+        "tina": "XB0fDUnXU5powFXDhCwa",
+        "will": "oWAxZDx7w5VEj9dCyTzz"
+    }
+    return voice_map.get(voice_name.lower(), "21m00Tcm4TlvDq8ikWAM")
+
+
+async def extract_document_text(doc: str) -> str:
+    """Extract text from a document (base64 or URL)"""
+    try:
+        # Handle URL
+        if doc.startswith("http"):
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(doc)
+                resp.raise_for_status()
+                data = resp.content
+        else:
+            # Handle base64
+            if "," in doc:
+                doc = doc.split(",", 1)[1]
+            data = base64.b64decode(doc)
+        
+        # Try PDF
+        try:
+            import fitz
+            doc_pdf = fitz.open(stream=data, filetype="pdf")
+            text = "\n".join([page.get_text() for page in doc_pdf])
+            if text.strip():
+                return text
+        except:
+            pass
+        
+        # Try DOCX
+        try:
+            import docx
+            doc_docx = docx.Document(BytesIO(data))
+            text = "\n".join([p.text for p in doc_docx.paragraphs])
+            if text.strip():
+                return text
+        except:
+            pass
+        
+        # Try plain text
+        try:
+            return data.decode("utf-8", errors="ignore")
+        except:
+            pass
+        
+        return "[Could not extract text from document]"
+    
+    except Exception as e:
+        logger.error(f"Document extraction failed: {e}")
+        return f"[Error extracting document: {str(e)}]"
+
+
+async def solve_math_with_reasoning(prompt: str, user_id: str, conversation_id: str, stream: bool) -> StreamingResponse:
+    """Solve math with step-by-step reasoning"""
+    async def event_generator():
+        try:
+            yield sse({"type": "status", "status": "solving"})
+            
+            system_prompt = """You are a mathematical expert. Solve problems step by step:
+1. Identify what's given and what's asked
+2. Choose the appropriate method/formula
+3. Show each step clearly
+4. Verify your answer
+Use LaTeX formatting for equations: $inline$ and $$block$$"""
+            
+            # Try Wolfram Alpha first
+            wolfram_result = None
+            if WOLFRAM_ALPHA_API_KEY:
+                try:
+                    wolfram_result = wolfram_alpha_query(prompt)
+                except:
+                    pass
+            
+            messages = [{"role": "system", "content": system_prompt}]
+            if wolfram_result:
+                messages.append({"role": "system", "content": f"Wolfram Alpha reference: {wolfram_result}"})
+            messages.append({"role": "user", "content": f"Solve step by step:\n\n{prompt}"})
+            
+            payload = {
+                "model": CHAT_MODEL,
+                "messages": messages,
+                "max_tokens": 4096,
+                "temperature": 0.3
+            }
+            
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream(
+                    "POST",
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=get_groq_headers(),
+                    json={**payload, "stream": True}
+                ) as response:
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: ") and line != "data: [DONE]":
+                            try:
+                                data = json.loads(line[6:])
+                                content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if content:
+                                    yield sse({"type": "token", "text": content})
+                            except:
+                                pass
+            
+            yield sse({"type": "done"})
+        except Exception as e:
+            logger.error(f"Math reasoning failed: {e}")
+            yield sse({"type": "error", "message": str(e)})
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+# ==================== UPDATE detect_intent FUNCTION ====================
+# Add this to your existing detect_intent function or replace it
+
+def detect_intent(prompt: str) -> tuple:
+    """
+    Detect the intent of a user prompt.
+    Returns: (intent_string, confidence_float)
+    """
+    if not prompt:
+        return ("chat", 0.0)
+    
+    prompt_lower = prompt.lower().strip()
+    
+    # Define intent patterns with weights
+    intent_patterns = {
+        "image_generation": {
+            "patterns": [
+                r"(generate|create|make|draw|paint|render)\s+(a\s+)?(image|picture|photo|art|illustration|drawing)",
+                r"(image|picture|photo)\s+of\s+",
+                r"generate\s+(an?\s+)?image",
+                r"create\s+(an?\s+)?(image|art|picture)",
+                r"dall[eé]",
+                r"stable\s+diffusion",
+                r"midjourney",
+            ],
+            "weight": 0.9
+        },
+        "video_generation": {
+            "patterns": [
+                r"(generate|create|make)\s+(a\s+)?(video|clip|animation)",
+                r"animate\s+",
+                r"video\s+of\s+",
+            ],
+            "weight": 0.9
+        },
+        "vision_analysis": {
+            "patterns": [
+                r"(analyze|describe|what(?:'s| is)\s+in|what\s+do\s+you\s+see)\s+(this\s+)?(image|picture|photo)",
+                r"(detect|identify|recognize|find)\s+",
+                r"ocr\s+",
+                r"read\s+(the\s+)?text\s+(from|in)\s+(this\s+)?image",
+            ],
+            "weight": 0.85
+        },
+        "img2vid": {
+            "patterns": [
+                r"animate\s+(this\s+)?image",
+                r"(make|turn|convert)\s+(this\s+)?image\s+(into|to)\s+(a\s+)?video",
+                r"image\s+to\s+video",
+            ],
+            "weight": 0.9
+        },
+        "math_calculation": {
+            "patterns": [
+                r"(calculate|compute|solve|evaluate)\s+",
+                r"\d+\s*[\+\-\*\/\^]\s*\d+",  # Simple math expressions
+                r"(what\s+is|what's)\s+\d+",
+                r"(sum|difference|product|quotient)\s+of",
+                r"(integral|derivative|equation|formula|theorem)",
+                r"(algebra|calculus|geometry|trigonometry)",
+            ],
+            "weight": 0.8
+        },
+        "joke": {
+            "patterns": [
+                r"tell\s+(me\s+)?(a\s+)?joke",
+                r"say\s+(something\s+)?funny",
+                r"make\s+me\s+laugh",
+            ],
+            "weight": 0.95
+        },
+        "code_generation": {
+            "patterns": [
+                r"(write|create|generate|code|implement|build|make)\s+(a\s+)?(function|class|program|script|code|app|api|bot)",
+                r"(python|javascript|java|cpp|c\+\+|rust|go|ruby|php|swift|kotlin|typescript)\s+(code|program|function|class)",
+                r"how\s+to\s+(code|program|implement)\s+",
+                r"(debug|fix)\s+(this\s+)?(code|error|bug)",
+                r"(algorithm|data\s+structure)",
+            ],
+            "weight": 0.8
+        },
+        "web_search": {
+            "patterns": [
+                r"(search|look\s+up|find|google)\s+(for\s+)?",
+                r"(what\s+is|who\s+is|where\s+is|when\s+was|why\s+does)\s+",
+                r"(latest|current|recent|news)\s+",
+                r"tell\s+me\s+about\s+",
+            ],
+            "weight": 0.7
+        },
+        "text_to_speech": {
+            "patterns": [
+                r"(speak|say|read|narrate|pronounce)\s+(this|it|the\s+text)",
+                r"text\s+to\s+speech",
+                r"tts",
+                r"convert\s+to\s+(audio|speech|voice)",
+                r"(make|generate)\s+(an?\s+)?audio",
+            ],
+            "weight": 0.85
+        },
+        "audio_transcription": {
+            "patterns": [
+                r"transcribe\s+(this\s+)?(audio|voice|speech|recording)",
+                r"speech\s+to\s+text",
+                r"convert\s+(this\s+)?audio\s+to\s+text",
+                r"what\s+(does|is)\s+(this|the)\s+audio\s+saying",
+            ],
+            "weight": 0.9
+        },
+        "translation": {
+            "patterns": [
+                r"translate\s+(this|the|to|in|from)",
+                r"in\s+(spanish|french|german|japanese|chinese|korean|italian|portuguese|russian|arabic|hindi)",
+                r"to\s+(spanish|french|german|japanese|chinese|korean|italian|portuguese|russian|arabic|hindi)",
+                r"(spanish|french|german|japanese|chinese|korean|italian|portuguese|russian|arabic|hindi)\s+(translation|version|for)",
+            ],
+            "weight": 0.85
+        },
+        "summarization": {
+            "patterns": [
+                r"summarize\s+(this|the|it)",
+                r"(summary|tldr|tl;dr|brief|overview)",
+                r"(key|main)\s+points\s+(of|from)",
+                r"condense\s+",
+                r"in\s+(short|brief)",
+            ],
+            "weight": 0.85
+        },
+        "reasoning": {
+            "patterns": [
+                r"(reason|think)\s+(through|about|step\s+by\s+step)",
+                r"explain\s+(why|how)\s+",
+                r"(analyze|evaluate|compare|contrast)\s+",
+                r"what\s+(would|should|could)\s+",
+                r"(pros\s+and\s+cons|advantages?\s+and\s+disadvantages?)",
+            ],
+            "weight": 0.7
+        },
+        "creative_writing": {
+            "patterns": [
+                r"(write|create|compose)\s+(a\s+)?(story|poem|song|lyrics|script|novel|dialogue)",
+                r"(creative|fiction|fantasy|sci-fi|horror|romance)",
+                r"(character|plot|setting|narrative)",
+            ],
+            "weight": 0.8
+        },
+        "document_analysis": {
+            "patterns": [
+                r"(analyze|read|extract|summarize)\s+(this\s+)?(document|pdf|doc|file)",
+                r"what(?:'s| is)\s+in\s+(this\s+)?(the\s+)?document",
+            ],
+            "weight": 0.85
+        },
+        "multimodal": {
+            "patterns": [
+                r"what(?:'s| is)\s+(in|this)",
+                r"describe\s+(this|it)",
+                r"(explain|analyze)\s+(this|it)",
+            ],
+            "weight": 0.5  # Lower weight, only applies with files
+        },
+    }
+    
+    # Check each intent pattern
+    best_intent = "chat"
+    best_score = 0
+    
+    for intent, config in intent_patterns.items():
+        for pattern in config["patterns"]:
+            match = re.search(pattern, prompt_lower)
+            if match:
+                # Calculate score based on match position and pattern weight
+                position_weight = 1.0 - (match.start() / max(len(prompt), 1)) * 0.5
+                score = config["weight"] * position_weight
+                if score > best_score:
+                    best_score = score
+                    best_intent = intent
+    
+    return (best_intent, min(best_score, 1.0))
+
 # Create a comprehensive capabilities endpoint
 @app.get("/capabilities")
 async def get_capabilities():
@@ -4762,7 +6161,11 @@ async def log_requests(request: Request, call_next):
 # Add middleware for CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://heloxai.xyz",
+        "https://www.heloxai.xyz",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -4928,6 +6331,1162 @@ async def metrics():
         "disk_usage": psutil.disk_usage('/').percent,
         "active_connections": len(active_connections) if 'active_connections' in globals() else 0,
         "cache_hit_rate": cache.get_stats().get("hits", 0) / max(cache.get_stats().get("total", 1), 1) if cache else 0
+    }
+
+# ==================== STT (Speech-to-Text) ENDPOINT ====================
+
+@app.post("/stt")
+async def speech_to_text(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Transcribe audio to text using Whisper.
+    Accepts audio file via multipart/form-data or base64 in JSON body.
+    """
+    try:
+        content_type = request.headers.get("content-type", "")
+        
+        audio_bytes = None
+        filename = "audio.wav"
+        
+        if "multipart/form-data" in content_type:
+            # Handle file upload
+            form = await request.form()
+            audio_file = form.get("audio") or form.get("file")
+            if not audio_file:
+                raise HTTPException(400, "No audio file provided")
+            
+            audio_bytes = await audio_file.read()
+            filename = audio_file.filename or "audio.wav"
+            
+        else:
+            # Handle JSON with base64
+            body = await request.json()
+            audio_b64 = body.get("audio") or body.get("data")
+            filename = body.get("filename", "audio.wav")
+            
+            if not audio_b64:
+                raise HTTPException(400, "No audio data provided")
+            
+            # Strip data URL prefix if present
+            if "," in audio_b64:
+                audio_b64 = audio_b64.split(",", 1)[1]
+            
+            audio_bytes = base64.b64decode(audio_b64)
+        
+        if not audio_bytes:
+            raise HTTPException(400, "Could not read audio data")
+        
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(suffix=f".{filename.split('.')[-1] if '.' in filename else 'wav'}", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            temp_path = tmp.name
+        
+        try:
+            # Get options from body or form
+            language = None
+            if "multipart/form-data" not in content_type:
+                language = (await request.json()).get("language")
+            else:
+                form_data = await request.form()
+                language = form_data.get("language")
+            
+            transcription = None
+            provider = None
+            
+            # Try OpenAI Whisper first
+            if OPENAI_API_KEY:
+                try:
+                    async with httpx.AsyncClient(timeout=120) as client:
+                        with open(temp_path, "rb") as f:
+                            files = {"file": (filename, f)}
+                            data = {
+                                "model": "whisper-1",
+                                "response_format": "verbose_json"
+                            }
+                            if language:
+                                data["language"] = language
+                            
+                            r = await client.post(
+                                "https://api.openai.com/v1/audio/transcriptions",
+                                headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                                files=files,
+                                data=data
+                            )
+                            r.raise_for_status()
+                            result = r.json()
+                            transcription = result.get("text", "")
+                            provider = "openai"
+                            
+                            # Return verbose result if available
+                            if "segments" in result:
+                                return {
+                                    "text": transcription,
+                                    "segments": result.get("segments", []),
+                                    "language": result.get("language", language),
+                                    "duration": result.get("duration", 0),
+                                    "provider": provider
+                                }
+                except Exception as e:
+                    logger.warning(f"OpenAI STT failed: {e}")
+            
+            # Try local Whisper as fallback
+            try:
+                import whisper
+                model = whisper.load_model("base")
+                options = {}
+                if language:
+                    options["language"] = language
+                
+                result = model.transcribe(temp_path, **options)
+                transcription = result["text"]
+                provider = "local_whisper"
+                language = result.get("language", language)
+                
+            except ImportError:
+                logger.warning("Local whisper not available")
+            except Exception as e:
+                logger.error(f"Local whisper failed: {e}")
+            
+            if not transcription:
+                raise HTTPException(500, "Transcription failed with all providers")
+            
+            return {
+                "text": transcription,
+                "language": language,
+                "provider": provider
+            }
+            
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"STT failed: {e}")
+        raise HTTPException(500, f"Transcription failed: {e}")
+
+
+@app.post("/stt/stream")
+async def speech_to_text_stream(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Stream transcription results as they become available.
+    """
+    try:
+        body = await request.json()
+        audio_b64 = body.get("audio") or body.get("data")
+        
+        if not audio_b64:
+            raise HTTPException(400, "No audio data provided")
+        
+        if "," in audio_b64:
+            audio_b64 = audio_b64.split(",", 1)[1]
+        
+        audio_bytes = base64.b64decode(audio_b64)
+        
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            temp_path = tmp.name
+        
+        try:
+            async def event_generator():
+                try:
+                    yield sse({"type": "status", "status": "transcribing"})
+                    
+                    if OPENAI_API_KEY:
+                        async with httpx.AsyncClient(timeout=120) as client:
+                            with open(temp_path, "rb") as f:
+                                r = await client.post(
+                                    "https://api.openai.com/v1/audio/transcriptions",
+                                    headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                                    files={"file": ("audio.wav", f)},
+                                    data={"model": "whisper-1", "response_format": "verbose_json"}
+                                )
+                                r.raise_for_status()
+                                result = r.json()
+                                
+                                # Stream segments
+                                for segment in result.get("segments", []):
+                                    yield sse({
+                                        "type": "segment",
+                                        "text": segment.get("text", ""),
+                                        "start": segment.get("start", 0),
+                                        "end": segment.get("end", 0),
+                                        "confidence": segment.get("avg_logprob", 0)
+                                    })
+                                    await asyncio.sleep(0.1)
+                                
+                                yield sse({
+                                    "type": "final",
+                                    "text": result.get("text", ""),
+                                    "language": result.get("language"),
+                                    "duration": result.get("duration", 0)
+                                })
+                    else:
+                        # Fallback to local
+                        import whisper
+                        model = whisper.load_model("base")
+                        result = model.transcribe(temp_path)
+                        yield sse({"type": "final", "text": result["text"], "language": result.get("language")})
+                    
+                    yield sse({"type": "done"})
+                    
+                except Exception as e:
+                    logger.error(f"STT stream failed: {e}")
+                    yield sse({"type": "error", "message": str(e)})
+            
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+        finally:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"STT stream failed: {e}")
+        raise HTTPException(500, f"Transcription failed: {e}")
+
+
+# ==================== TTS (Text-to-Speech) ENDPOINT ====================
+
+@app.post("/tts")
+async def text_to_speech(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Convert text to speech.
+    Returns base64 encoded audio data.
+    """
+    try:
+        body = await request.json()
+        text = body.get("text") or body.get("prompt") or ""
+        voice = body.get("voice", "alloy")
+        model = body.get("model", "tts-1")  # tts-1 or tts-1-hd
+        speed = body.get("speed", 1.0)
+        response_format = body.get("format", "mp3")  # mp3, opus, aac, flac, wav
+        
+        if not text:
+            raise HTTPException(400, "Text is required")
+        
+        # Clean text (remove markdown, etc.)
+        text = re.sub(r"[#*`\[\]]", "", text)
+        text = text.strip()
+        
+        audio_b64 = None
+        provider = None
+        
+        # Try ElevenLabs first for better quality
+        if ELEVENLABS_API_KEY:
+            try:
+                voice_id = get_elevenlabs_voice_id(voice)
+                
+                async with httpx.AsyncClient(timeout=60) as client:
+                    payload = {
+                        "text": text,
+                        "model_id": "eleven_multilingual_v2",
+                        "voice_settings": {
+                            "stability": 0.5,
+                            "similarity_boost": 0.75,
+                            "style": 0.0,
+                            "use_speaker_boost": True
+                        }
+                    }
+                    
+                    r = await client.post(
+                        f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                        headers={
+                            "xi-api-key": ELEVENLABS_API_KEY,
+                            "Content-Type": "application/json"
+                        },
+                        json=payload
+                    )
+                    r.raise_for_status()
+                    audio_b64 = base64.b64encode(r.content).decode()
+                    provider = "elevenlabs"
+                    
+            except Exception as e:
+                logger.warning(f"ElevenLabs TTS failed: {e}")
+        
+        # Fallback to OpenAI
+        if not audio_b64 and OPENAI_API_KEY:
+            try:
+                # Map voice names for OpenAI
+                openai_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+                if voice not in openai_voices:
+                    voice = "alloy"
+                
+                async with httpx.AsyncClient(timeout=60) as client:
+                    r = await client.post(
+                        "https://api.openai.com/v1/audio/speech",
+                        headers={
+                            "Authorization": f"Bearer {OPENAI_API_KEY}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": model,
+                            "input": text,
+                            "voice": voice,
+                            "speed": speed,
+                            "response_format": response_format
+                        }
+                    )
+                    r.raise_for_status()
+                    audio_b64 = base64.b64encode(r.content).decode()
+                    provider = "openai"
+                    
+            except Exception as e:
+                logger.error(f"OpenAI TTS failed: {e}")
+        
+        if not audio_b64:
+            raise HTTPException(500, "No TTS provider available")
+        
+        return {
+            "audio": audio_b64,
+            "format": response_format,
+            "voice": voice,
+            "provider": provider,
+            "text_length": len(text),
+            "text_preview": text[:100] + "..." if len(text) > 100 else text
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TTS failed: {e}")
+        raise HTTPException(500, f"TTS failed: {e}")
+
+
+@app.post("/tts/stream")
+async def text_to_speech_stream(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Stream TTS audio as it's generated.
+    """
+    try:
+        body = await request.json()
+        text = body.get("text") or body.get("prompt") or ""
+        voice = body.get("voice", "alloy")
+        
+        if not text:
+            raise HTTPException(400, "Text is required")
+        
+        # Clean text
+        text = re.sub(r"[#*`\[\]]", "", text).strip()
+        
+        async def event_generator():
+            try:
+                yield sse({"type": "status", "status": "generating"})
+                
+                # ElevenLabs supports streaming
+                if ELEVENLABS_API_KEY:
+                    try:
+                        voice_id = get_elevenlabs_voice_id(voice)
+                        
+                        async with httpx.AsyncClient(timeout=60) as client:
+                            async with client.stream(
+                                "POST",
+                                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                                headers={
+                                    "xi-api-key": ELEVENLABS_API_KEY,
+                                    "Content-Type": "application/json"
+                                },
+                                json={
+                                    "text": text,
+                                    "model_id": "eleven_multilingual_v2",
+                                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
+                                }
+                            ) as response:
+                                audio_chunks = []
+                                async for chunk in response.aiter_bytes(chunk_size=4096):
+                                    if chunk:
+                                        audio_chunks.append(chunk)
+                                        yield sse({
+                                            "type": "chunk",
+                                            "data": base64.b64encode(chunk).decode(),
+                                            "size": len(chunk)
+                                        })
+                                
+                                # Final complete audio
+                                complete_audio = b"".join(audio_chunks)
+                                yield sse({
+                                    "type": "done",
+                                    "audio": base64.b64encode(complete_audio).decode(),
+                                    "provider": "elevenlabs",
+                                    "total_size": len(complete_audio)
+                                })
+                        return
+                    except Exception as e:
+                        logger.warning(f"ElevenLabs stream failed: {e}")
+                
+                # OpenAI fallback (doesn't stream, return complete)
+                if OPENAI_API_KEY:
+                    openai_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+                    voice_to_use = voice if voice in openai_voices else "alloy"
+                    
+                    async with httpx.AsyncClient(timeout=60) as client:
+                        r = await client.post(
+                            "https://api.openai.com/v1/audio/speech",
+                            headers={
+                                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "model": "tts-1",
+                                "input": text,
+                                "voice": voice_to_use
+                            }
+                        )
+                        r.raise_for_status()
+                        audio_b64 = base64.b64encode(r.content).decode()
+                        yield sse({
+                            "type": "done",
+                            "audio": audio_b64,
+                            "provider": "openai",
+                            "total_size": len(r.content)
+                        })
+                else:
+                    yield sse({"type": "error", "message": "No TTS provider available"})
+                    
+            except Exception as e:
+                logger.error(f"TTS stream failed: {e}")
+                yield sse({"type": "error", "message": str(e)})
+        
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no"
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TTS stream failed: {e}")
+        raise HTTPException(500, f"TTS failed: {e}")
+
+
+@app.get("/tts/voices")
+async def get_tts_voices(
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """Get available TTS voices."""
+    voices = {
+        "openai": [
+            {"id": "alloy", "name": "Alloy", "description": "Neutral, balanced"},
+            {"id": "echo", "name": "Echo", "description": "Warm, clear"},
+            {"id": "fable", "name": "Fable", "description": "Expressive, storytelling"},
+            {"id": "onyx", "name": "Onyx", "description": "Deep, authoritative"},
+            {"id": "nova", "name": "Nova", "description": "Friendly, upbeat"},
+            {"id": "shimmer", "name": "Shimmer", "description": "Soft, gentle"}
+        ],
+        "elevenlabs": [
+            {"id": "rachel", "name": "Rachel", "description": "Calm, professional"},
+            {"id": "drew", "name": "Drew", "description": "Warm, conversational"},
+            {"id": "bella", "name": "Bella", "description": "Clear, articulate"},
+            {"id": "antoni", "name": "Antoni", "description": "Professional, mature"},
+            {"id": "elli", "name": "Elli", "description": "Young, energetic"},
+            {"id": "josh", "name": "Josh", "description": "Casual, friendly"},
+            {"id": "arnold", "name": "Arnold", "description": "Strong, commanding"},
+            {"id": "sam", "name": "Sam", "description": "Young, enthusiastic"},
+            {"id": "gigi", "name": "Gigi", "description": "Youthful, upbeat"},
+            {"id": "grace", "name": "Grace", "description": "Soothing, mature"},
+            {"id": "daniel", "name": "Daniel", "description": "Deep, resonant"},
+            {"id": "callum", "name": "Callum", "description": "British, refined"},
+            {"id": "charlotte", "name": "Charlotte", "description": "Warm, engaging"},
+            {"id": "alice", "name": "Alice", "description": "Clear, professional"},
+            {"id": "finn", "name": "Finn", "description": "Casual, relatable"},
+            {"id": "lily", "name": "Lily", "description": "Soft, gentle"},
+            {"id": "adam", "name": "Adam", "description": "Deep, authoritative"}
+        ]
+    }
+    
+    # Filter by available providers
+    available = {}
+    if OPENAI_API_KEY:
+        available["openai"] = voices["openai"]
+    if ELEVENLABS_API_KEY:
+        available["elevenlabs"] = voices["elevenlabs"]
+    
+    if not available:
+        available["openai"] = voices["openai"]  # Show options even if no key
+    
+    return {
+        "voices": available,
+        "default": "alloy",
+        "providers": {
+            "openai": bool(OPENAI_API_KEY),
+            "elevenlabs": bool(ELEVENLABS_API_KEY)
+        }
+    }
+
+
+# ==================== ACTIVE STREAMS TRACKING ====================
+
+# Track active streams for stop functionality
+active_streams: Dict[str, asyncio.Event] = {}
+active_stream_lock = asyncio.Lock()
+
+
+async def check_stream_active(stream_id: str) -> bool:
+    """Check if a stream should continue running."""
+    async with active_stream_lock:
+        event = active_streams.get(stream_id)
+        if event is None:
+            return False
+        return not event.is_set()
+
+
+async def stop_stream(stream_id: str):
+    """Signal a stream to stop."""
+    async with active_stream_lock:
+        event = active_streams.get(stream_id)
+        if event:
+            event.set()
+
+
+async def register_stream(stream_id: str) -> asyncio.Event:
+    """Register a new active stream."""
+    async with active_stream_lock:
+        event = asyncio.Event()
+        active_streams[stream_id] = event
+        return event
+
+
+async def unregister_stream(stream_id: str):
+    """Remove a stream from tracking."""
+    async with active_stream_lock:
+        active_streams.pop(stream_id, None)
+
+
+# ==================== STOP ENDPOINT ====================
+
+@app.post("/stop")
+async def stop_generation(
+    request: Request,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Stop an active generation/stream.
+    """
+    try:
+        body = await request.json()
+        stream_id = body.get("stream_id")
+        conversation_id = body.get("conversation_id")
+        
+        # If stream_id provided, stop specific stream
+        if stream_id:
+            await stop_stream(stream_id)
+            return {"status": "stopped", "stream_id": stream_id}
+        
+        # If conversation_id provided, stop all streams for that conversation
+        if conversation_id:
+            stopped_count = 0
+            async with active_stream_lock:
+                # Stream IDs often contain conversation_id
+                for sid in list(active_streams.keys()):
+                    if conversation_id in sid:
+                        active_streams[sid].set()
+                        stopped_count += 1
+            return {"status": "stopped", "conversation_id": conversation_id, "streams_stopped": stopped_count}
+        
+        # Stop all active streams (admin-like)
+        stopped_count = 0
+        async with active_stream_lock:
+            for event in active_streams.values():
+                event.set()
+                stopped_count += 1
+            active_streams.clear()
+        
+        return {"status": "stopped", "streams_stopped": stopped_count}
+        
+    except Exception as e:
+        logger.error(f"Stop failed: {e}")
+        raise HTTPException(500, f"Failed to stop generation: {e}")
+
+
+@app.delete("/stop/{stream_id}")
+async def stop_generation_by_id(
+    stream_id: str,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """Stop a specific stream by ID."""
+    await stop_stream(stream_id)
+    return {"status": "stopped", "stream_id": stream_id}
+
+
+# ==================== REGENERATE ENDPOINT ====================
+
+@app.post("/regenerate")
+async def regenerate_response(
+    request: Request,
+    response: Response,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Regenerate the last assistant response in a conversation.
+    """
+    try:
+        body = await request.json()
+        conversation_id = body.get("conversation_id")
+        stream = body.get("stream", True)
+        model = body.get("model", CHAT_MODEL)
+        temperature = body.get("temperature", 0.7)
+        system_prompt = body.get("system_prompt")
+        
+        if not conversation_id:
+            raise HTTPException(400, "conversation_id is required")
+        
+        # Get user identity
+        identity = current_user or {}
+        user_id = identity.get("id") or request.cookies.get("guest_id") or str(uuid.uuid4())
+        
+        # Fetch conversation messages
+        messages_res = await asyncio.to_thread(
+            lambda: supabase.table("messages")
+            .select("id, role, content, created_at")
+            .eq("conversation_id", conversation_id)
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(10)
+            .execute()
+        )
+        
+        messages = messages_res.data or []
+        
+        if not messages:
+            raise HTTPException(404, "No messages found in conversation")
+        
+        # Find the last user message and last assistant message
+        last_user_msg = None
+        last_assistant_msg_id = None
+        
+        for msg in messages:
+            if msg["role"] == "user" and not last_user_msg:
+                last_user_msg = msg["content"]
+            elif msg["role"] == "assistant" and not last_assistant_msg_id:
+                last_assistant_msg_id = msg["id"]
+                # Keep looking for user message if we found assistant first
+        
+        if not last_user_msg:
+            raise HTTPException(400, "No user message found to regenerate from")
+        
+        # Build message history (excluding the last assistant message)
+        history_res = await asyncio.to_thread(
+            lambda: supabase.table("messages")
+            .select("role, content")
+            .eq("conversation_id", conversation_id)
+            .eq("user_id", user_id)
+            .order("created_at")
+            .limit(20)
+            .execute()
+        )
+        
+        history_messages = history_res.data or []
+        
+        # Remove the last assistant message from history
+        if history_messages and history_messages[-1]["role"] == "assistant":
+            history_messages = history_messages[:-1]
+        
+        # Delete the old assistant message from database
+        if last_assistant_msg_id:
+            await asyncio.to_thread(
+                lambda: supabase.table("messages")
+                .delete()
+                .eq("id", last_assistant_msg_id)
+                .execute()
+            )
+        
+        # Generate new response
+        stream_id = f"regenerate_{conversation_id}_{int(time.time())}"
+        
+        if stream:
+            async def event_generator():
+                stop_event = await register_stream(stream_id)
+                try:
+                    yield sse({"type": "status", "status": "regenerating"})
+                    
+                    messages_payload = []
+                    if system_prompt:
+                        messages_payload.append({"role": "system", "content": system_prompt})
+                    messages_payload.extend(history_messages)
+                    
+                    # Use chat_with_tools for generation
+                    reply = await chat_with_tools(user_id, messages_payload)
+                    
+                    # Stream the response with stop checking
+                    for i, char in enumerate(reply):
+                        if stop_event.is_set():
+                            yield sse({"type": "stopped"})
+                            break
+                        yield sse({"type": "token", "text": char})
+                        await asyncio.sleep(0.005)
+                    
+                    if not stop_event.is_set():
+                        # Save new response
+                        await asyncio.to_thread(
+                            lambda: supabase.table("messages").insert({
+                                "id": str(uuid.uuid4()),
+                                "conversation_id": conversation_id,
+                                "user_id": user_id,
+                                "role": "assistant",
+                                "content": reply,
+                                "created_at": datetime.utcnow().isoformat()
+                            }).execute()
+                        )
+                        yield sse({"type": "done"})
+                    
+                except Exception as e:
+                    logger.error(f"Regenerate streaming failed: {e}")
+                    yield sse({"type": "error", "message": str(e)})
+                finally:
+                    await unregister_stream(stream_id)
+            
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+        else:
+            # Non-streaming regenerate
+            messages_payload = []
+            if system_prompt:
+                messages_payload.append({"role": "system", "content": system_prompt})
+            messages_payload.extend(history_messages)
+            
+            reply = await chat_with_tools(user_id, messages_payload)
+            
+            # Save response
+            await asyncio.to_thread(
+                lambda: supabase.table("messages").insert({
+                    "id": str(uuid.uuid4()),
+                    "conversation_id": conversation_id,
+                    "user_id": user_id,
+                    "role": "assistant",
+                    "content": reply,
+                    "created_at": datetime.utcnow().isoformat()
+                }).execute()
+            )
+            
+            return {
+                "response": reply,
+                "conversation_id": conversation_id,
+                "regenerated": True
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Regenerate failed: {e}")
+        raise HTTPException(500, f"Failed to regenerate: {e}")
+
+
+# ==================== NEW CHAT ENDPOINT ====================
+
+@app.post("/newchat")
+async def create_new_chat(
+    request: Request,
+    response: Response,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Create a new chat/conversation.
+    Optionally copies system prompt and settings from previous conversation.
+    """
+    try:
+        body = await request.json()
+        previous_conversation_id = body.get("previous_conversation_id")
+        title = body.get("title")
+        system_prompt = body.get("system_prompt")
+        settings = body.get("settings", {})
+        
+        # Get user identity
+        identity = current_user or {}
+        user_id = identity.get("id") or request.cookies.get("guest_id") or str(uuid.uuid4())
+        
+        # Set guest cookie if needed
+        if not identity.get("id") and not request.cookies.get("guest_id"):
+            response.set_cookie(
+                key="guest_id",
+                value=user_id,
+                httponly=True,
+                secure=True,
+                samesite="lax",
+                max_age=60 * 60 * 24 * 7
+            )
+        
+        # Create new conversation
+        new_conversation_id = str(uuid.uuid4())
+        
+        conversation_data = {
+            "id": new_conversation_id,
+            "user_id": user_id,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        # Copy title if provided
+        if title:
+            conversation_data["title"] = title
+        
+        # Copy system prompt if provided
+        if system_prompt:
+            conversation_data["system_prompt"] = system_prompt
+        
+        # Copy settings if provided
+        if settings:
+            conversation_data["settings"] = json.dumps(settings)
+        
+        # If previous conversation specified, try to copy some metadata
+        if previous_conversation_id:
+            try:
+                prev_res = await asyncio.to_thread(
+                    lambda: supabase.table("conversations")
+                    .select("system_prompt, settings")
+                    .eq("id", previous_conversation_id)
+                    .eq("user_id", user_id)
+                    .execute()
+                )
+                
+                if prev_res.data:
+                    prev_data = prev_res.data[0]
+                    
+                    # Copy system prompt if not explicitly provided
+                    if not system_prompt and prev_data.get("system_prompt"):
+                        conversation_data["system_prompt"] = prev_data["system_prompt"]
+                    
+                    # Copy settings if not explicitly provided
+                    if not settings and prev_data.get("settings"):
+                        conversation_data["settings"] = prev_data["settings"]
+                        
+            except Exception as e:
+                logger.warning(f"Failed to copy from previous conversation: {e}")
+        
+        # Insert new conversation
+        await asyncio.to_thread(
+            lambda: supabase.table("conversations").insert(conversation_data).execute()
+        )
+        
+        return {
+            "conversation_id": new_conversation_id,
+            "user_id": user_id,
+            "created": True,
+            "copied_from": previous_conversation_id if previous_conversation_id else None
+        }
+        
+    except Exception as e:
+        logger.error(f"New chat failed: {e}")
+        raise HTTPException(500, f"Failed to create new chat: {e}")
+
+
+@app.delete("/chat/{conversation_id}")
+async def delete_chat(
+    conversation_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Delete a chat/conversation and all its messages.
+    """
+    try:
+        identity = current_user or {}
+        user_id = identity.get("id") or request.cookies.get("guest_id")
+        
+        if not user_id:
+            raise HTTPException(401, "Authentication required")
+        
+        # Delete all messages in the conversation
+        await asyncio.to_thread(
+            lambda: supabase.table("messages")
+            .delete()
+            .eq("conversation_id", conversation_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        
+        # Delete the conversation itself
+        await asyncio.to_thread(
+            lambda: supabase.table("conversations")
+            .delete()
+            .eq("id", conversation_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        
+        # Stop any active streams for this conversation
+        await stop_stream(conversation_id)
+        
+        return {"status": "deleted", "conversation_id": conversation_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete chat failed: {e}")
+        raise HTTPException(500, f"Failed to delete chat: {e}")
+
+
+@app.get("/chats")
+async def list_chats(
+    request: Request,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    List all chats/conversations for the current user.
+    """
+    try:
+        identity = current_user or {}
+        user_id = identity.get("id") or request.cookies.get("guest_id")
+        
+        if not user_id:
+            return {"chats": [], "total": 0}
+        
+        # Get conversations
+        conv_res = await asyncio.to_thread(
+            lambda: supabase.table("conversations")
+            .select("id, title, created_at, updated_at, system_prompt")
+            .eq("user_id", user_id)
+            .order("updated_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        
+        conversations = conv_res.data or []
+        
+        # Get message count and last message for each conversation
+        for conv in conversations:
+            try:
+                count_res = await asyncio.to_thread(
+                    lambda c=conv["id"]: supabase.table("messages")
+                    .select("id", count="exact")
+                    .eq("conversation_id", c)
+                    .execute()
+                )
+                conv["message_count"] = count_res.count if hasattr(count_res, 'count') else 0
+                
+                # Get last message preview
+                last_res = await asyncio.to_thread(
+                    lambda c=conv["id"]: supabase.table("messages")
+                    .select("content, role, created_at")
+                    .eq("conversation_id", c)
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                
+                if last_res.data:
+                    last_msg = last_res.data[0]
+                    conv["last_message"] = {
+                        "content": last_msg["content"][:100] + "..." if len(last_msg["content"]) > 100 else last_msg["content"],
+                        "role": last_msg["role"],
+                        "created_at": last_msg["created_at"]
+                    }
+            except Exception as e:
+                logger.warning(f"Failed to get conversation details: {e}")
+                conv["message_count"] = 0
+        
+        # Get total count
+        total_res = await asyncio.to_thread(
+            lambda: supabase.table("conversations")
+            .select("id", count="exact")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        total = total_res.count if hasattr(total_res, 'count') else len(conversations)
+        
+        return {
+            "chats": conversations,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }
+        
+    except Exception as e:
+        logger.error(f"List chats failed: {e}")
+        raise HTTPException(500, f"Failed to list chats: {e}")
+
+
+@app.get("/chat/{conversation_id}")
+async def get_chat(
+    conversation_id: str,
+    request: Request,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Get all messages in a conversation.
+    """
+    try:
+        identity = current_user or {}
+        user_id = identity.get("id") or request.cookies.get("guest_id")
+        
+        if not user_id:
+            raise HTTPException(401, "Authentication required")
+        
+        # Get conversation details
+        conv_res = await asyncio.to_thread(
+            lambda: supabase.table("conversations")
+            .select("id, title, created_at, system_prompt, settings")
+            .eq("id", conversation_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        
+        if not conv_res.data:
+            raise HTTPException(404, "Conversation not found")
+        
+        conversation = conv_res.data[0]
+        
+        # Parse settings if it's a string
+        if isinstance(conversation.get("settings"), str):
+            try:
+                conversation["settings"] = json.loads(conversation["settings"])
+            except:
+                conversation["settings"] = {}
+        
+        # Get messages
+        msg_res = await asyncio.to_thread(
+            lambda: supabase.table("messages")
+            .select("id, role, content, created_at, metadata")
+            .eq("conversation_id", conversation_id)
+            .order("created_at")
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        
+        messages = msg_res.data or []
+        
+        return {
+            "conversation": conversation,
+            "messages": messages,
+            "limit": limit,
+            "offset": offset
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get chat failed: {e}")
+        raise HTTPException(500, f"Failed to get chat: {e}")
+
+
+@app.patch("/chat/{conversation_id}")
+async def update_chat(
+    conversation_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user_optional)
+):
+    """
+    Update conversation metadata (title, system prompt, etc.)
+    """
+    try:
+        body = await request.json()
+        
+        identity = current_user or {}
+        user_id = identity.get("id") or request.cookies.get("guest_id")
+        
+        if not user_id:
+            raise HTTPException(401, "Authentication required")
+        
+        # Build update data
+        update_data = {"updated_at": datetime.utcnow().isoformat()}
+        
+        if "title" in body:
+            update_data["title"] = body["title"]
+        if "system_prompt" in body:
+            update_data["system_prompt"] = body["system_prompt"]
+        if "settings" in body:
+            update_data["settings"] = json.dumps(body["settings"]) if isinstance(body["settings"], dict) else body["settings"]
+        
+        # Auto-generate title from first message if no title provided
+        if not body.get("title") and "auto_title" in body and body["auto_title"]:
+            try:
+                first_msg_res = await asyncio.to_thread(
+                    lambda: supabase.table("messages")
+                    .select("content")
+                    .eq("conversation_id", conversation_id)
+                    .eq("role", "user")
+                    .order("created_at")
+                    .limit(1)
+                    .execute()
+                )
+                
+                if first_msg_res.data:
+                    first_msg = first_msg_res.data[0]["content"]
+                    # Generate a short title
+                    title_prompt = f"Generate a very short title (max 5 words) for a chat that starts with: {first_msg[:200]}"
+                    
+                    payload = {
+                        "model": CHAT_MODEL,
+                        "messages": [{"role": "user", "content": title_prompt}],
+                        "max_tokens": 20,
+                        "temperature": 0.3
+                    }
+                    
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        r = await client.post(
+                            "https://api.groq.com/openai/v1/chat/completions",
+                            headers=get_groq_headers(),
+                            json=payload
+                        )
+                        r.raise_for_status()
+                        title = r.json()["choices"][0]["message"]["content"].strip().strip('"').strip("'")
+                        update_data["title"] = title
+            except Exception as e:
+                logger.warning(f"Auto-title generation failed: {e}")
+        
+        # Update conversation
+        await asyncio.to_thread(
+            lambda: supabase.table("conversations")
+            .update(update_data)
+            .eq("id", conversation_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        
+        return {
+            "status": "updated",
+            "conversation_id": conversation_id,
+            "updates": update_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update chat failed: {e}")
+        raise HTTPException(500, f"Failed to update chat: {e}")
+
+
+# ==================== HELPER: Get Groq Headers ====================
+
+def get_groq_headers() -> dict:
+    """Get headers for Groq API."""
+    return {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
     }
 
 # Add documentation endpoint
