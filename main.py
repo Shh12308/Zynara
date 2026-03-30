@@ -4337,6 +4337,148 @@ async def comprehensive_health_check():
 
 # Replace your existing /ask/universal endpoint with this enhanced version
 
+# ==========================================
+# 1. LONG-TERM USER MEMORY ENGINE
+# ==========================================
+async def fetch_user_memory(user_id: str) -> str:
+    """Silently fetches what the AI knows about the user from the database."""
+    if not user_id or user_id == "anonymous":
+        return ""
+    
+    try:
+        res = await asyncio.to_thread(
+            lambda: supabase.table("user_memories")
+            .select("category, content")
+            .eq("user_id", user_id)
+            .order("last_referenced", desc=True)
+            .limit(10) # Get the 10 most relevant/recent memories
+            .execute()
+        )
+        
+        if not res.data:
+            return ""
+            
+        memory_str = "User Profile & Memories:\n"
+        for mem in res.data:
+            memory_str += f"- [{mem.get('category', 'info')}] {mem['content']}\n"
+            
+        return memory_str
+    except Exception as e:
+        logger.error(f"Failed to fetch user memory: {e}")
+        return ""
+
+async def extract_and_save_memory(user_id: str, prompt: str, response: str):
+    """Runs in the background AFTER responding to extract new facts about the user."""
+    if not user_id or user_id == "anonymous":
+        return
+
+    try:
+        # Use a fast, cheap model to extract facts
+        extraction_prompt = f"""Analyze this conversation. Extract any new facts, preferences, or context about the USER (not the AI). 
+If the user mentioned their name, job, tech stack, preferences, or ongoing projects, extract them.
+Return ONLY a JSON array of objects with 'category' and 'content'. If nothing new is learned, return empty array [].
+Example: [{{"category": "tech_stack", "content": "Uses Python and FastAPI"}}, {{"category": "preference", "content": "Prefers dark mode UI"}}]
+
+User: {prompt[:500]}
+AI: {response[:500]}"""
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=get_groq_headers(),
+                json={
+                    "model": "llama-3.1-8b-instant", # Fast model for background tasks
+                    "messages": [{"role": "user", "content": extraction_prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": 200
+                }
+            )
+            data = r.json()
+            raw_text = data["choices"][0]["message"]["content"]
+            
+            # Clean up markdown if the LLM wraps it
+            if "```json" in raw_text:
+                raw_text = raw_text.split("```json")[1].split("```")[0]
+            
+            facts = json.loads(raw_text)
+            
+            if facts:
+                for fact in facts:
+                    if fact.get("content"):
+                        await asyncio.to_thread(
+                            lambda f=fact: supabase.table("user_memories").upsert({
+                                "user_id": user_id,
+                                "category": f.get("category", "info"),
+                                "content": f["content"],
+                                "last_referenced": datetime.utcnow().isoformat()
+                            }, on_conflict="user_id,content").execute()
+                        )
+    except Exception as e:
+        logger.warning(f"Background memory extraction failed: {e}")
+
+
+# ==========================================
+# 2. LADDER REASONING (ITERATIVE ACTIONS) ENGINE
+# ==========================================
+async def execute_ladder_reasoning(prompt: str, user_id: str, history: list):
+    """Instead of doing one task, it plans, acts, observes, and suggests next steps."""
+    
+    system_prompt = """You are an autonomous iterative agent. When given a task:
+1. Break it down into a "Ladder" of logical steps.
+2. Execute Step 1.
+3. Evaluate the result of Step 1.
+4. Proceed to Step 2, and so on.
+5. Once finished, suggest 2-3 logical "Next Steps" the user might want to take.
+
+Format your output strictly like this:
+🪜 **Step 1: [Name of Step]**
+[Execute/Provide the step]
+
+✅ **Step 1 Result:** [Brief observation]
+
+🪜 **Step 2: [Name of Step]**
+[Execute the step]..."""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        *history[-4:], # Keep slight context
+        {"role": "user", "content": f"Task: {prompt}\n\nExecute this step-by-step, showing the ladder of reasoning."}
+    ]
+    
+    async def event_generator():
+        try:
+            yield sse({"type": "status", "status": "planning_ladder"})
+            
+            async with httpx.AsyncClient(timeout=120) as client:
+                async with client.stream(
+                    "POST",
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers=get_groq_headers(),
+                    json={
+                        "model": CHAT_MODEL,
+                        "messages": messages,
+                        "temperature": 0.4,
+                        "max_tokens": 4096,
+                        "stream": True
+                    }
+                ) as response:
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: ") and line != "data: [DONE]":
+                            try:
+                                data = json.loads(line[6:])
+                                content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if content:
+                                    yield sse({"type": "token", "text": content})
+                            except:
+                                pass
+            
+            yield sse({"type": "done"})
+        except Exception as e:
+            logger.error(f"Ladder reasoning failed: {e}")
+            yield sse({"type": "error", "message": str(e)})
+
+    return event_generator
+    
 @app.post("/ask/universal")
 async def ask_universal(
     request: Request,
@@ -5290,41 +5432,59 @@ Be imaginative and avoid clichés."""
             else:
                 raise HTTPException(500, "Multimodal requires OpenAI API key")
 
-        # -------------------------
-        # CHAT (DEFAULT STREAMING)
+                # -------------------------
+        # CHAT (DEFAULT STREAMING WITH MEMORY & LADDER)
         # -------------------------
         else:
+            # 1. Fetch Long-Term Memory silently
+            user_memory_str = await fetch_user_memory(user_id)
+            
+            # 2. Detect if user wants iterative reasoning (Ladder)
+            wants_ladder = any(kw in prompt.lower() for kw in [
+                "step by step", "plan this out", "break this down", 
+                "fully implement", "end to end", "from start to finish",
+                "build me a complete", "set up the whole"
+            ])
+
+            if wants_ladder:
+                # Route to Ladder Reasoning
+                return StreamingResponse(
+                    execute_ladder_reasoning(prompt, user_id, history_messages),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+                )
+
+            # 3. Standard Streaming Chat with Memory Injection
             async def event_generator():
+                full_reply = ""
                 try:
                     yield f"data: {json.dumps({'type': 'status', 'status': 'thinking'})}\n\n"
                     
-                    # Build messages with optional context and documents
+                    # Build messages, injecting memory if it exists
                     messages = []
                     
-                    if system_prompt:
-                        messages.append({"role": "system", "content": system_prompt})
+                    base_system = system_prompt or "You are ZyNaraAI, a highly capable AI."
+                    if user_memory_str:
+                        base_system += f"\n\n{user_memory_str}\n\nUse this context to personalize your response if relevant."
                     
-                    # Add context if provided
+                    messages.append({"role": "system", "content": base_system})
+                    
                     if context:
                         messages.append({"role": "system", "content": f"Additional context: {context}"})
                     
-                    # Add document content if provided
                     if documents:
                         doc_texts = []
                         for doc in documents:
                             doc_text = await extract_document_text(doc)
                             doc_texts.append(doc_text)
                         if doc_texts:
-                            messages.append({
-                                "role": "system", 
-                                "content": f"Reference documents:\n{chr(10).join(doc_texts)}"
-                            })
+                            messages.append({"role": "system", "content": f"Reference documents:\n{chr(10).join(doc_texts)}"})
                     
                     messages.extend(history_messages)
                     messages.append({"role": "user", "content": prompt})
                     
-                    # Use chat_with_tools for enhanced chat
                     reply = await chat_with_tools(user_id, messages)
+                    full_reply = reply
                     
                     for char in reply:
                         yield f"data: {json.dumps({'type': 'token', 'text': char})}\n\n"
@@ -5347,6 +5507,10 @@ Be imaginative and avoid clichés."""
                 except Exception as e:
                     logger.error(f"Chat streaming failed: {e}")
                     yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+                finally:
+                    # 4. BACKGROUND TASK: Extract memory for next time (Non-blocking)
+                    if full_reply:
+                        asyncio.create_task(extract_and_save_memory(user_id, prompt, full_reply))
 
             return StreamingResponse(
                 event_generator(),
