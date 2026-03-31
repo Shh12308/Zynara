@@ -47,7 +47,7 @@ RUN pip install --no-cache-dir \
     opencv-python-headless \
     pillow numpy scipy \
     pydantic requests httpx \
-    redis supabase-py \
+    redis supabase \
     soundfile librosa \
     einops \
     moviepy \
