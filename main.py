@@ -397,8 +397,7 @@ import wordcloud  # For word clouds
 import pyLDAvis  # For topic modeling visualization
 import networkx  # For network analysis
 import igraph  # For network analysis
-import graph-
-_tool  # For network analysis
+import graph_tool  # For network analysis
 import pyvis  # For network visualization
 import gephi  # For network visualization
 import cytoscape  # For network visualization
