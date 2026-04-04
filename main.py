@@ -739,10 +739,10 @@ groq_client = httpx.AsyncClient(
 
 # ---------- CONFIG & LOGGING ----------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger("zynara-server")
+logger = logging.getLogger("heloxai-server")
 
 app = FastAPI(
-    title="ZyNaraAI1.0 Multimodal Server",
+    title="HeloXAI1.0 Multimodal Server",
     redirect_slashes=False
 )
 
@@ -2283,7 +2283,7 @@ def init_distributed_task_queue():
         
         # Configure Celery
         distributed_task_queue = Celery(
-            "zynara_tasks",
+            "heloxai_tasks",
             broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
             backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
         )
@@ -2360,17 +2360,17 @@ def init_monitoring():
         # Create metrics
         monitoring = {
             "request_count": prometheus_client.Counter(
-                "zynara_request_count",
+                "heloxai_request_count",
                 "Total number of requests",
                 ["method", "endpoint"]
             ),
             "request_duration": prometheus_client.Histogram(
-                "zynara_request_duration_seconds",
+                "heloxai_request_duration_seconds",
                 "Request duration in seconds",
                 ["method", "endpoint"]
             ),
             "active_requests": prometheus_client.Gauge(
-                "zynara_active_requests",
+                "heloxai_active_requests",
                 "Number of active requests"
             )
         }
@@ -2413,7 +2413,7 @@ def init_logging():
                 "file": {
                     "class": "logging.handlers.RotatingFileHandler",
                     "formatter": "json",
-                    "filename": "zynara.log",
+                    "filename": "heloxai.log",
                     "maxBytes": 10485760,  # 10MB
                     "backupCount": 5
                 }
@@ -2494,13 +2494,13 @@ def init_api_documentation():
     
     try:
         api_documentation = {
-            "title": "ZyNaraAI API",
+            "title": "HeloXAI API",
             "description": "Advanced AI system with multimodal capabilities",
             "version": "1.0.0",
             "contact": {
                 "name": "GoldYLocks",
-                "url": "https://github.com/goldylocks",
-                "email": "goldylocks@example.com"
+                "url": "https://github.com/shh12308",
+                "email": "goldylocks@helox.com"
             },
             "license": {
                 "name": "MIT",
@@ -2580,7 +2580,7 @@ def init_middleware():
                 "gzip_min_length": 1000
             },
             "tracing": {
-                "service_name": "zynara-api",
+                "service_name": "heloxai-api",
                 "sample_rate": 0.1
             }
         }
@@ -2634,7 +2634,7 @@ performance_optimization = init_performance_optimization()
 # ==================== NEW ADVANCED FEATURES ====================
 
 # Custom Model Architecture
-class ZyNaraTransformer(torch.nn.Module):
+class HeloXAiTransformer(torch.nn.Module):
     def __init__(self, config):
         super().__init__()
         self.transformer = AutoModel.from_pretrained(config.base_model)
@@ -3378,12 +3378,12 @@ class AIMonitor:
             from prometheus_client import CollectorRegistry, Gauge, Histogram
             self.metrics_collector = CollectorRegistry()
             self.request_duration = Histogram(
-                'zynara_request_duration_seconds',
+                'heloxai_request_duration_seconds',
                 'Request duration in seconds',
                 registry=self.metrics_collector
             )
             self.active_requests = Gauge(
-                'zynara_active_requests',
+                'heloxai_active_requests',
                 'Number of active requests',
                 registry=self.metrics_collector
             )
@@ -5464,7 +5464,7 @@ Be imaginative and avoid clichés."""
                     # Build messages, injecting memory if it exists
                     messages = []
                     
-                    base_system = system_prompt or "You are ZyNaraAI, a highly capable AI."
+                    base_system = system_prompt or "You are HeloXAI, a highly capable AI."
                     if user_memory_str:
                         base_system += f"\n\n{user_memory_str}\n\nUse this context to personalize your response if relevant."
                     
