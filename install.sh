@@ -284,37 +284,7 @@ install_system_deps() {
 
 # Setup firewall
 setup_firewall() {
-    log "Configuring firewall..."
-    
-    # Reset UFW
-    ufw --force reset
-    
-    # Default policies
-    ufw default deny incoming
-    ufw default allow outgoing
-    
-    # Allow SSH
-    ufw allow ssh
-    
-    # Allow application ports
-    ufw allow "$PORT/tcp"
-    
-    if [ "$ENABLE_SSL" = true ]; then
-        ufw allow 443/tcp
-    fi
-    
-    if [ "${ENABLE_PROMETHEUS:-true}" = true ]; then
-        ufw allow 9090/tcp
-    fi
-    
-    if [ "${ENABLE_GRAFANA:-true}" = true ]; then
-        ufw allow 3000/tcp
-    fi
-    
-    # Enable firewall
-    ufw --force enable
-    
-    log "Firewall configured"
+    warn "Skipping firewall setup (not supported on RunPod)"
 }
 
 # Create configuration
