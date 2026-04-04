@@ -932,22 +932,15 @@ cleanup() {
 
 # Main installation function
 main() {
-    # Set up error handling
     trap cleanup EXIT
-    
-    # Show banner
     show_banner
-    
-    # Parse arguments
     parse_args "$@"
-    
-    # Installation steps
     check_requirements
     create_backup
     update_system
     install_system_deps
-    setup_firewall
-    create_config
+    create_config       # move this here before firewall
+    setup_firewall      # or skip as needed
     create_directories
     setup_python_env
     setup_redis
@@ -960,7 +953,6 @@ main() {
     start_services
     health_check
     show_final_info
-    
     log "Installation completed successfully!"
 }
 
