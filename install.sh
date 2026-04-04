@@ -909,8 +909,8 @@ main() {
     create_backup
     update_system
     install_system_deps
-    create_config       # move this here before firewall
-    setup_firewall      # or skip as needed
+    create_config       # <-- move this above firewall
+    setup_firewall      # now PORT will be defined
     create_directories
     setup_python_env
     setup_redis
