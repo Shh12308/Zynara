@@ -89,18 +89,18 @@ HOST=0.0.0.0
 SECRET_KEY=$(openssl rand -hex 32)
 
 # Database (Supabase)
-SUPABASE_URL=your_supabase_url_here
-SUPABASE_KEY=your_supabase_key_here
-SUPABASE_SERVICE_ROLE_KEY=your_service_role_key_here
+SUPABASE_URL=https://orozxlbnurnchwodzfdt.supabase.co
+SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9yb3p4bGJudXJuY2h3b2R6ZmR0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MjQ0NzQzOCwiZXhwIjoyMDY4MDIzNDM4fQ.9kH9sIrHEiNJ_woo5d2MiOP2qbZAgxANebRE43GZ0ks
+
 
 # API Keys
-GROQ_API_KEY=your_groq_key_here
-OPENAI_API_KEY=your_openai_key_here
+GROQ_API_KEY=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
+OPENAI_API_KEY=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
 ANTHROPIC_API_KEY=your_anthropic_key_here
-ELEVENLABS_API_KEY=your_elevenlabs_key_here
-SERPER_API_KEY=your_serper_key_here
+ELEVENLABS_API_KEY=sk_d173ac9cee78949658cbb0ee36a7a4ee99e9bf92bdb7974e
+SERPER_API_KEY=2f474cee55e9162530aece81af8b1d63bf8512caa228071941d77480008450a8
 STABILITY_API_KEY=your_stability_key_here
-HUGGINGFACE_API_KEY=your_hf_key_here
+HUGGINGFACE_API_KEY=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
 
 # Vector DBs
 PINECONE_API_KEY=your_pinecone_key_here
@@ -124,5 +124,5 @@ echo -e "${YELLOW}--------------------------------------------------${NC}"
 # Optional: Auto-start if this is the container entrypoint
 if [ "${AUTO_START:-false}" = "true" ]; then
     log "Auto-starting HeloXAi..."
-    exec uvicorn main:app --host 0.0.0.0 --port 8080
+    exec uvicorn main:main --host 0.0.0.0 --port 8080
 fi
