@@ -45,7 +45,6 @@ dask[complete]
 modin[all]
 vaex
 datatable
-rapids-dask-dependency
 
 # ============================
 # Machine Learning & Deep Learning
@@ -91,7 +90,6 @@ spacy
 textacy
 trafilatura
 beautifulsoup4
-readability-lxml
 lxml
 html2text
 newsapi-python
@@ -106,10 +104,8 @@ cohere
 python-docx
 python-pptx
 pypdf
-pymupdf
 pdfplumber
 unstructured
-textract
 
 # ============================
 # Computer Vision & Image Processing
@@ -147,7 +143,6 @@ torch-geometric
 dgl
 stellargraph
 igraph
-graph-tool
 python-igraph
 node2vec
 deepwalk
@@ -232,4 +227,4 @@ discord.py
 slack-sdk
 python-telegram-bot
 psutil
- GPUtil
+gputil
