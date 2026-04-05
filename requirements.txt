@@ -90,7 +90,6 @@ google-cloud-functions>=1.10.0
 azure-functions>=1.10.0
 tflite-runtime>=2.9.0
 coremltools>=6.2.0
-onnxruntime-mobile>=1.12.0
 pytorch-mobile>=1.12.0
 
 # =========================
