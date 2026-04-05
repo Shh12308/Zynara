@@ -89,7 +89,6 @@ aws-lambda>=2.0.0
 google-cloud-functions>=1.10.0
 azure-functions>=1.10.0
 vercel>=0.2.0
-netlify>=0.2.0
 cloudflare-workers>=0.1.0
 tflite-runtime>=2.9.0
 coremltools>=6.2.0
