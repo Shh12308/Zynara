@@ -95,7 +95,6 @@ html2text
 newsapi-python
 wikipedia
 arxiv
-googlesearch-python
 duckduckgo-search
 wolframalpha
 openai
@@ -141,7 +140,6 @@ av
 # ============================
 torch-geometric
 dgl
-stellargraph
 igraph
 python-igraph
 node2vec
