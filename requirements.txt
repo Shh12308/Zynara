@@ -201,7 +201,7 @@ bentoml
 torchserve
 tritonclient[all]
 grpcio
-strawberry[graphql]
+strawberry-graphql[graphql]==1.10.4
 
 # ============================
 # Utilities & Integrations
