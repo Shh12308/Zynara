@@ -1,152 +1,235 @@
-# =========================
-# Core Libraries
-# =========================
-numpy>=1.21.0
-pandas>=1.3.0
-scipy>=1.7.0
-scikit-learn>=1.0.0
-scikit-image>=0.19.0
-matplotlib>=3.5.0
-seaborn>=0.11.0
-plotly>=5.0.0
-pillow>=8.3.0
-opencv-python>=4.5.0
-requests>=2.25.0
-httpx>=0.23.0
-tqdm>=4.62.0
-nltk>=3.6.0
-spacy>=3.2.0
-beautifulsoup4>=4.9.0
-lxml>=4.6.0
-trafilatura>=1.0.0
-wikipedia>=1.4.0
-arxiv>=1.4.0
-PyMuPDF>=1.19.0
-python-docx>=0.8.0
-python-pptx>=0.6.0
-pytesseract>=0.3.8
-soundfile>=0.10.0
-librosa>=0.8.0
-moviepy>=1.0.3
-imageio>=2.9.0
-sympy>=1.9.0
-yfinance>=0.1.70
-alpha-vantage>=2.3.0
-tweepy>=4.0.0
-praw>=7.6.0
-googlemaps>=4.6.0
-pyowm>=3.2.0
-newsapi-python>=0.2.6
-wolframalpha>=5.0.0
+# ============================
+# Web Framework & API
+# ============================
+fastapi
+uvicorn[standard]
+python-multipart
+httpx
+requests
+sse-starlette
+slowapi
+python-jose[cryptography]
+passlib[bcrypt]
+python-json-logger
+pydantic
+pydantic-settings
+python-dotenv
 
-# =========================
-# Deep Learning
-# =========================
-torch>=1.12.0
-torchvision>=0.13.0
-transformers>=4.20.0
-diffusers>=0.10.0
-accelerate>=0.20.0
-pytorch-lightning>=1.7.0
-fastai>=2.7.0
-tensorflow>=2.9.0
-keras>=2.9.0
-jax>=0.3.0
-flax>=0.5.0
-optax>=0.1.0
-dm-haiku>=0.0.5
-einops>=0.6.0
-timm>=0.6.0
-efficientnet-pytorch>=0.7.0
-vit-pytorch>=1.0.0
+# ============================
+# Database & Storage
+# ============================
+supabase
+redis
+elasticsearch
+pymongo
+chromadb
+faiss-cpu
+pinecone-client
+weaviate-client
+qdrant-client
+pymilvus
+psycopg2-binary
 
-# =========================
-# ML Explainability & Evaluation
-# =========================
-shap>=0.41.0
-lime>=0.2.0
-eli5>=0.13.0
-captum>=0.5.0
-alibi>=0.6.0
-innvestigate>=2.0.0
-tf-explain>=0.3.0
-evaluate>=0.4.0
-rouge-score>=0.1.0
-sacrebleu>=2.3.0
-bert-score>=0.3.0
+# ============================
+# Core Data Science & Math
+# ============================
+numpy
+scipy
+pandas
+polars
+scikit-learn
+networkx
+sympy
+numba
+dask[complete]
+modin[all]
+vaex
+datatable
+rapids-dask-dependency
 
-# =========================
-# Model Serving & Deployment
-# =========================
-bentoml>=1.0.0
-tritonclient>=2.24.0
-torchserve>=0.6.0
-tensorflow-serving-api>=2.9.0
-kfserving>=0.6.1
-seldon-core>=1.15.0
-cortex>=0.16.0
-aws-lambda>=2.0.0
-google-cloud-functions>=1.10.0
-azure-functions>=1.10.0
-tflite-runtime>=2.9.0
-coremltools>=6.2.0
-pytorch-mobile>=1.12.0
+# ============================
+# Machine Learning & Deep Learning
+# ============================
+torch
+torchvision
+torchaudio
+tensorflow
+keras
+jax[libcuda]
+flax
+optax
+dm-haiku
+dm-tree
+xgboost
+lightgbm
+catboost
+onnx
+onnxruntime
+optimum
+accelerate
+bitsandbytes
+peft
+trl
+deepspeed
+transformers
+datasets
+tokenizers
+evaluate
+safetensors
 
-# =========================
-# Graph & Network Libraries
-# =========================
-networkx>=2.8.0
-igraph>=0.10.0
-graph-tool>=2.42.0
-pyvis>=0.2.0
-graphistry>=0.25.0
-node2vec>=0.4.0
-deepwalk>=1.2.0
-graph2vec>=0.7.0
-stellargraph>=1.2.0
-dgl>=1.0.0
-torch-geometric>=2.1.0
-spektral>=1.2.0
+# ============================
+# NLP & LLMs
+# ============================
+langchain
+langchain-openai
+langchain-community
+langchain-core
+sentence-transformers
+tiktoken
+nltk
+spacy
+textacy
+trafilatura
+beautifulsoup4
+readability-lxml
+lxml
+html2text
+newsapi-python
+wikipedia
+arxiv
+googlesearch-python
+duckduckgo-search
+wolframalpha
+openai
+anthropic
+cohere
+python-docx
+python-pptx
+pypdf
+pymupdf
+pdfplumber
+unstructured
+textract
 
-# =========================
-# Data Processing & Big Data
-# =========================
-dask>=2022.7.0
-modin>=0.15.0
-polars>=0.15.0
-vaex>=4.5.0
-datatable>=1.0.0
-ray>=2.0.0
-rapids-cudf>=22.08.0
-cuml>=22.08.0
-dask-cuda>=22.08.0
-cupy-cuda11x>=10.6.0
+# ============================
+# Computer Vision & Image Processing
+# ============================
+opencv-python
+pillow
+scikit-image
+imageio
+matplotlib
+seaborn
+ultralytics
+mediapipe
+pytesseract
+albumentations
+imgaug
 
-# =========================
-# Web & APIs
-# =========================
-fastapi>=0.85.0
-uvicorn>=0.18.0
-sse-starlette>=1.6.0
-supabase>=0.7.0
-pydantic>=1.10.0
-marshmallow>=3.17.0
-jsonschema>=4.6.0
-cerberus>=1.3.0
-voluptuous>=0.13.0
+# ============================
+# Audio Processing
+# ============================
+librosa
+soundfile
+SpeechRecognition
+pydub
 
-# =========================
-# Visualization
-# =========================
-bokeh>=2.4.0
-altair>=4.2.0
-pygal>=3.0.0
-holoviews>=1.15.0
-panel>=0.13.0
-streamlit>=1.12.0
-dash>=2.6.0
-gradio>=3.1.0
-voila>=0.3.0
-ipywidgets>=8.0.0
-wordcloud>=1.9.0
-pyLDAvis>=3.3.0
+# ============================
+# Video Processing
+# ============================
+moviepy
+av
+
+# ============================
+# Graph Machine Learning
+# ============================
+torch-geometric
+dgl
+stellargraph
+igraph
+graph-tool
+python-igraph
+node2vec
+deepwalk
+
+# ============================
+# Visualization & Dashboarding
+# ============================
+plotly
+bokeh
+altair
+pygal
+holoviews
+panel
+streamlit
+dash
+gradio
+voila
+ipywidgets
+jupyter
+wordcloud
+pyldavis
+pyvis
+graphistry
+
+# ============================
+# Experiment Tracking & Monitoring
+# ============================
+wandb
+mlflow
+comet-ml
+neptune-client
+tensorboard
+prometheus-client
+whylogs
+arize
+fiddler
+
+# ============================
+# Explainability & Safety
+# ============================
+shap
+lime
+eli5
+captum
+alibi
+transformers-interpret
+adversarial-robustness-toolbox
+foolbox
+textattack
+cleverhans
+fairlearn
+aif360
+
+# ============================
+# Deployment & Serving
+# ============================
+bentoml
+torchserve
+tritonclient[all]
+grpcio
+strawberry[graphql]
+
+# ============================
+# Utilities & Integrations
+# ============================
+tqdm
+pyyaml
+requests-cache
+rich
+typer
+schedule
+celery
+redis
+apscheduler
+praw
+tweepy
+googlemaps
+pyowm
+yfinance
+alpha-vantage
+discord.py
+slack-sdk
+python-telegram-bot
+psutil
+ GPUtil
