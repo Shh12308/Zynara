@@ -18,14 +18,13 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response, HTTPException, Depends, UploadFile, File, Cookie, Header
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
-from fastapi.responses import PlainTextResponse
 import time
 
 import httpx
-from supabase import create_client, create_async_client
+from supabase import create_client
 
 # =========================
 # CONFIG & LOGGING
@@ -34,12 +33,13 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger("HeloXAi")
+logger = logging.getLogger("HeloXAI")
 
 # Environment Variables
+# CRITICAL: Use SERVICE_KEY for backend Admin access
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # CRITICAL: Used for backend Admin access
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") 
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") # Kept if needed for other logic
 GROQ_API_KEY = os.getenv("GROQ_API_KEY").strip() if os.getenv("GROQ_API_KEY") else None
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
@@ -52,7 +52,7 @@ LOGO_URL = os.getenv("LOGO_URL", "https://heloxai.xyz/logo.png")
 # Using Llama 3.1 405B on Groq for advanced reasoning and coding
 # This replaces Llama 3.3 70B for a "bigger" version.
 DEFAULT_LLM_MODEL = "llama-3.1-405b-reasoning"
-CODE_MODEL = "llama-3.1-405b-reasoning" 
+CODE_MODEL = "llama-3.1-405b-reasoning" # Also using 405B for code
 
 # File handling config
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
@@ -67,18 +67,18 @@ SESSION_DURATION = 365 * 24 * 60 * 60  # 1 year in seconds
 REFRESH_THRESHOLD = 7 * 24 * 60 * 60  # Refresh session if less than 7 days remaining
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-    raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set for this backend.")
+    raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set.")
 
 app = FastAPI(
-    title="HeloxAi API",
+    title="HeloXAI API",
     description="Advanced AI Assistant Backend (RunPod Ready)",
-    version="2.1.0"
+    version="2.1.0-Optimized"
 )
 
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://heloxai.xyz", "*"], # Allow * for RunPod serverless testing usually, but restrict for prod
+    allow_origins=["https://heloxai.xyz", "*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -86,8 +86,7 @@ app.add_middleware(
 )
 
 # Database Clients
-# IMPORTANT: We use the SERVICE_KEY here because we are doing custom auth (cookies).
-# The ANON_KEY relies on Supabase Auth (JWTs), which we aren't using for user identification.
+# IMPORTANT: Service Key used for custom auth
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 # Global State for Stream Cancellation
@@ -371,7 +370,7 @@ async def extract_file_content(
                 original_size=original_size
             )
 
-        # Handle PDF
+        # Handle PDF (Using PyMuPDF/fitz)
         if filename.lower().endswith('.pdf'):
             return await extract_pdf_content(content, filename, max_length, metadata)
 
@@ -452,18 +451,18 @@ async def extract_pdf_content(
     max_length: int,
     metadata: Dict[str, Any]
 ) -> FileExtractionResult:
-    """Extract text from PDF files"""
+    """Extract text from PDF files using PyMuPDF (fitz)"""
     try:
-        from PyPDF2 import PdfReader
-        reader = PdfReader(BytesIO(content))
+        import fitz  # PyMuPDF
+        doc = fitz.open(stream=content, filetype="pdf")
         pages = []
         
-        for i, page in enumerate(reader.pages):
-            page_text = page.extract_text() or ""
+        for i, page in enumerate(doc):
+            page_text = page.get_text() or ""
             pages.append(f"--- Page {i + 1} ---\n{page_text}")
         
         full_text = "\n\n".join(pages)
-        metadata["page_count"] = len(reader.pages)
+        metadata["page_count"] = len(doc)
         
         truncated = len(full_text) > max_length
         if truncated:
@@ -476,10 +475,17 @@ async def extract_pdf_content(
             original_size=len(content)
         )
     except ImportError:
-        logger.warning("PyPDF2 not installed, returning placeholder for PDF")
+        logger.warning("fitz (PyMuPDF) not installed, returning placeholder for PDF")
         return FileExtractionResult(
             content=f"[PDF file: {filename} ({format_file_size(len(content))}) - PDF parsing not available on server]",
             metadata=metadata,
+            original_size=len(content)
+        )
+    except Exception as e:
+        logger.error(f"PDF extraction error: {e}")
+        return FileExtractionResult(
+            content=f"[PDF Error: {str(e)}]",
+            metadata={**metadata, "error": str(e)},
             original_size=len(content)
         )
 
@@ -783,14 +789,13 @@ async def extract_tar_content(
 # =========================
 # PRODUCTION-GRADE AUTH SYSTEM
 # =========================
-PRIMARY_COOKIE = "HeloxAi_Session"
-FINGERPRINT_COOKIE = "HeloxAi_FP"
-BACKUP_COOKIE = "HeloxAi_ID"
-DEVICE_COOKIE = "HeloxAi_Dev"
-SESSION_TOKEN_COOKIE = "HeloxAi_Token"
-SESSION_EXPIRY_COOKIE = "HeloxAi_Expiry"
+PRIMARY_COOKIE = "HeloXAI_Session"
+FINGERPRINT_COOKIE = "HeloXAI_FP"
+BACKUP_COOKIE = "HeloXAI_ID"
+DEVICE_COOKIE = "HeloXAI_Dev"
+SESSION_TOKEN_COOKIE = "HeloXAI_Token"
+SESSION_EXPIRY_COOKIE = "HeloXAI_Expiry"
 
-# Cookie settings - production grade
 def get_cookie_settings(remember: bool = True) -> Dict:
     """Get cookie settings based on remember preference"""
     if remember:
@@ -817,8 +822,8 @@ def generate_device_fingerprint(request: Request) -> str:
         request.headers.get("user-agent", ""),
         request.headers.get("accept-language", ""),
         request.headers.get("accept-encoding", ""),
-        request.headers.get("sec-ch-ua-platform", ""),  # New API for platform
-        request.headers.get("sec-ch-ua-mobile", ""),    # Mobile detection
+        request.headers.get("sec-ch-ua-platform", ""), 
+        request.headers.get("sec-ch-ua-mobile", ""),    
         request.client.host if request.client else "",
     ]
     fp_string = "|".join(fp_components)
@@ -939,8 +944,8 @@ async def create_user_session(
                 "user_id": user_id,
                 "token": token,
                 "fingerprint": fingerprint,
-                "user_agent": "",  # Would need to pass from request
-                "ip_address": "",  # Would need to pass from request
+                "user_agent": "", 
+                "ip_address": "", 
                 "expires_at": expires_at.isoformat(),
                 "is_valid": True,
                 "created_at": datetime.now(timezone.utc).isoformat()
@@ -1025,11 +1030,6 @@ CREATOR_QUESTION_PATTERNS = [
     r'\bwho\s+created\s+helox\b',
     r'\bwho\s+built\s+helox\b',
     r'\bwho\s+developed\s+helox\b',
-    r'\bmade\s+by\s+who\b',
-    r'\bcreated\s+by\s+who\b',
-    r'\bbuilt\s+by\s+who\b',
-    r'\bdeveloped\s+by\s+who\b',
-    r'\bconstructed\s+by\s+who\b',
     r'\btell\s+me\s+about\s+your\s+(creator|developer|maker|builder|founder)\b',
     r'\bwhat\s+company\s+made\s+you\b',
     r'\bwhat\s+team\s+made\s+you\b',
@@ -1654,7 +1654,7 @@ class RegenerateRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
-    voice: str = "rachel"
+    voice: str = "rachel"  # Defaulting to Rachel
 
 
 class IntentInfo(BaseModel):
@@ -1903,240 +1903,71 @@ def get_elevenlabs_headers():
 
 
 # =========================
-# VIDEO WATERMARK SYSTEM
+# MATH ENGINE (Wolfram Alpha)
 # =========================
-async def fetch_logo_image() -> Optional[bytes]:
-    """Fetch the logo.png from the configured URL"""
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(LOGO_URL)
-            if response.status_code == 200:
-                return response.content
-            logger.error(f"Failed to fetch logo: HTTP {response.status_code}")
-    except Exception as e:
-        logger.error(f"Logo fetch error: {e}")
-    return None
-
-
-async def add_watermark_to_video(video_url: str) -> str:
-    """Add transparent watermark to video"""
-    try:
-        from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip
-        import tempfile
-        
-        logo_bytes = await fetch_logo_image()
-        if not logo_bytes:
-            logger.warning("No logo available, returning unwatermarked video")
-            return video_url
-        
-        async with httpx.AsyncClient(timeout=120) as client:
-            video_response = await client.get(video_url)
-            if video_response.status_code != 200:
-                logger.error(f"Failed to download video: HTTP {video_response.status_code}")
-                return video_url
-            video_bytes = video_response.content
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            video_path = os.path.join(tmpdir, "input.mp4")
-            logo_path = os.path.join(tmpdir, "logo.png")
-            output_path = os.path.join(tmpdir, "output.mp4")
-            
-            with open(video_path, "wb") as f:
-                f.write(video_bytes)
-            with open(logo_path, "wb") as f:
-                f.write(logo_bytes)
-            
-            def process_video():
-                video = VideoFileClip(video_path)
-                logo_width = int(video.w * 0.15)
-                logo = ImageClip(logo_path)
-                logo_aspect = logo.h / logo.w
-                logo_height = int(logo_width * logo_aspect)
-                logo = logo.resize((logo_width, logo_height))
-                padding = 20
-                logo = logo.set_position((video.w - logo_width - padding, video.h - logo_height - padding))
-                logo = logo.set_duration(video.duration)
-                logo = logo.set_opacity(0.7)
-                final = CompositeVideoClip([video, logo])
-                final.write_videofile(
-                    output_path,
-                    codec="libx264",
-                    audio_codec="aac",
-                    temp_audiofile=os.path.join(tmpdir, "temp_audio.m4a"),
-                    remove_temp=True,
-                    logger=None
-                )
-                video.close()
-                logo.close()
-                final.close()
-                return output_path
-            
-            output_path = await asyncio.to_thread(process_video)
-            
-            with open(output_path, "rb") as f:
-                watermarked_bytes = f.read()
-            
-            filename = f"watermarked_{uuid.uuid4().hex}.mp4"
-            path = f"public/videos/{filename}"
-            
-            try:
-                await asyncio.to_thread(
-                    lambda: supabase.storage.from_("ai-videos").upload(
-                        path, watermarked_bytes, {"content-type": "video/mp4"}
-                    )
-                )
-                watermarked_url = f"{SUPABASE_URL}/storage/v1/object/public/ai-videos/{path}"
-                logger.info(f"Watermarked video uploaded: {watermarked_url}")
-                return watermarked_url
-            except Exception as upload_err:
-                logger.warning(f"Storage upload failed, using data URI: {upload_err}")
-                b64_video = base64.b64encode(watermarked_bytes).decode()
-                return f"data:video/mp4;base64,{b64_video}"
-                
-    except ImportError:
-        logger.error("moviepy not installed")
-        return video_url
-    except Exception as e:
-        logger.error(f"Watermark error: {e}")
-        return video_url
-
-
-# =========================
-# CORE LOGIC
-# =========================
-async def save_message(user_id: str, conv_id: str, role: str, content: str):
-    data = {
-        "id": str(uuid.uuid4()),
-        "conversation_id": conv_id,
-        "role": role,
-        "content": content,
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
-    await _execute_supabase_with_retry(
-        supabase.table("messages").insert(data),
-        description="Save Message"
-    )
-
-
-async def handle_text_analysis(
-    text: str,
-    stream: bool,
-    user_prompt: str = "",
-    file_metadata: Dict[str, Any] = None
-):
-    text = text[:MAX_TEXT_LENGTH]
+async def solve_math(query: str) -> str:
+    """Primary Math Solver using Wolfram Alpha, fallback to Llama 405B"""
+    if WOLFRAM_ALPHA_API_KEY and 'wolframalpha' in sys.modules:
+        try:
+            client = wolframalpha.Client(WOLFRAM_ALPHA_API_KEY)
+            res = client.query(query)
+            if hasattr(res, 'results'):
+                return next(res.results).text
+            elif hasattr(res, 'pods'):
+                return res.pods[1].text if len(res.pods) > 1 else "Wolfram could not solve this."
+        except Exception as e:
+            logger.warning(f"Wolfram failed: {e}, falling back to LLM")
     
-    # Build context from file metadata
-    file_context = ""
-    if file_metadata:
-        file_context = f"\n\nFile Information:\n"
-        for key, value in file_metadata.items():
-            if key != "files":  # Don't include full file list in prompt
-                file_context += f"- {key}: {value}\n"
-    
-    messages = [
-        {
-            "role": "system",
-            "content": get_system_prompt(user_prompt) + f"""
-
-You analyze files and code. Detect the type automatically and respond accordingly:
-
-- Code files → explain functionality, find bugs, suggest improvements, document
-- PDF/docs → summarize content, extract key insights
-- Data files → identify patterns, suggest analysis approaches
-- Logs → find errors, identify issues, suggest fixes
-- Archives → summarize extracted content from multiple files
-
-Be structured and clear. Use code blocks with appropriate language tags.
-Preserve important technical details.{file_context}"""
-        },
-        {
-            "role": "user",
-            "content": text
-        }
-    ]
-
-    if stream:
-        async def gen():
-            task = asyncio.current_task()
-            try:
-                async for token in stream_groq_chat(messages):
-                    if task.cancelled():
-                        break
-                    yield sse({"type": "token", "text": token})
-                yield sse({"type": "done"})
-            except Exception as e:
-                logger.error(f"Text analysis stream error: {e}")
-                yield sse({"type": "error", "message": "Analysis failed."})
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
+    # Fallback to LLM
     async with httpx.AsyncClient() as client:
         r = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers=get_groq_headers(),
-            json={
-                "model": DEFAULT_LLM_MODEL,
-                "messages": messages
-            }
+            json={"model": DEFAULT_LLM_MODEL, "messages": [{"role": "user", "content": f"Solve step by step: {query}"}]}
         )
-        r.raise_for_status()
-
-    return {"analysis": r.json()["choices"][0]["message"]["content"]}
+        return r.json()["choices"][0]["message"]["content"]
 
 
-async def handle_image_analysis(image_bytes: bytes, stream: bool, user_prompt: str = ""):
-    b64 = base64.b64encode(image_bytes).decode()
+# =========================
+# CODE EXECUTION (Judge0)
+# =========================
+JUDGE0_LANGUAGES = {
+    "python": 71, "javascript": 63, "java": 62, "cpp": 54,
+    "c": 50, "csharp": 51, "go": 60, "rust": 73, "sql": 82
+}
 
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": user_prompt or "Analyze this image in detail."},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
-            ]
-        }]
-    }
-
-    # FIXED: Added timeout=60.0 to prevent ReadTimeout errors
-    async with httpx.AsyncClient(timeout=60.0) as client:
+async def execute_code(code: str, language: str) -> dict:
+    lang_id = JUDGE0_LANGUAGES.get(language.lower(), 71)
+    
+    async with httpx.AsyncClient(timeout=30) as client:
+        # Submit
         r = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=get_openai_headers(),
-            json=payload
+            "https://judge0-ce.p.rapidapi.com/submissions",
+            headers={"X-RapidAPI-Key": JUDGE0_API_KEY, "Content-Type": "application/json"},
+            json={"source_code": code, "language_id": lang_id, "stdin": ""}
         )
-        r.raise_for_status()
-
-    result = r.json()["choices"][0]["message"]["content"]
-
-    if stream:
-        async def gen():
-            task = asyncio.current_task()
-            try:
-                yield sse({"type": "text", "text": result})
-                yield sse({"type": "done"})
-            except Exception as e:
-                logger.error(f"Image analysis stream error: {e}")
-                yield sse({"type": "error", "message": "Analysis failed."})
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
-    return {"analysis": result}
-
-
-async def get_history(conv_id: str, limit: int = 10):
-    res = await _execute_supabase_with_retry(
-        supabase.table("messages")
-        .select("role, content")
-        .eq("conversation_id", conv_id)
-        .order("created_at", desc=False)
-        .limit(limit),
-        description="Get History"
-    )
-    return [{"role": m["role"], "content": m["content"]} for m in (res.data or [])]
+        token = r.json()["token"]
+        
+        # Poll
+        for _ in range(10):
+            await asyncio.sleep(1)
+            r = await client.get(
+                f"https://judge0-ce.p.rapidapi.com/submissions/{token}",
+                headers={"X-RapidAPI-Key": JUDGE0_API_KEY}
+            )
+            data = r.json()
+            if data["status"]["id"] in (1, 2): continue # Processing
+            return {
+                "stdout": data.get("stdout", ""),
+                "stderr": data.get("stderr", ""),
+                "status": data["status"]["description"]
+            }
+    return {"error": "Execution timed out"}
 
 
+# =========================
+# CORE CHAT LOGIC
+# =========================
 async def stream_groq_chat(messages: list, model: str = DEFAULT_LLM_MODEL, max_tokens: int = 1024):
     try:
         async with httpx.AsyncClient(timeout=None) as client:
@@ -2172,130 +2003,9 @@ async def stream_groq_chat(messages: list, model: str = DEFAULT_LLM_MODEL, max_t
         raise e
 
 
-async def handle_code_assistant(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
-    system_prompt = get_detector().get_code_system_prompt(prompt)
-    
-    user_memory = user.get("memory", "")
-    if user_memory:
-        system_prompt += f"\n\nUser Context: {user_memory}"
-
-    history = await get_history(conv_id) if conv_id else []
-    messages = [{"role": "system", "content": system_prompt}] + history
-
-    intent_result = detect_intent(prompt)
-    logger.info(
-        f"[CODE] sub_intent={intent_result.intent.value if intent_result else 'none'} "
-        f"confidence={(intent_result.confidence if intent_result else 0):.2%}"
-    )
-
-    if stream:
-        async def gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                full_text = ""
-                # Using Llama 3.1 405B for coding as requested
-                async for token in stream_groq_chat(messages, model=CODE_MODEL):
-                    if task.cancelled():
-                        break
-                    full_text += token
-                    yield sse({"type": "token", "text": token})
-
-                # MEMORY UPDATE LOGIC: Update user memory with a summary of the interaction
-                # For a production app, you might want to extract specific facts rather than appending full text.
-                # Here we append a truncated summary to ensure the "memory" feature works.
-                if user_memory:
-                    new_memory = user_memory + "\n" + full_text[-500:]
-                else:
-                    new_memory = full_text[-1000:] # Keep last 1000 chars as memory
-                
-                if len(new_memory) > 5000: # Limit memory size
-                    new_memory = new_memory[-5000:]
-                
-                # Update asynchronously, don't block response
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-                if conv_id:
-                    try:
-                        await save_message(user["id"], conv_id, "assistant", full_text)
-                    except Exception as e:
-                        logger.error(f"Failed to save assistant message: {e}")
-                yield sse({"type": "done"})
-            
-            except Exception as e:
-                logger.error(f"Streaming Error: {e}")
-                yield sse({"type": "error", "message": "An error occurred processing your request."})
-            
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=get_groq_headers(),
-            json={"model": CODE_MODEL, "messages": messages, "max_tokens": 2048}
-        )
-        r.raise_for_status()
-        reply = r.json()["choices"][0]["message"]["content"]
-        
-        # Sync memory update for non-streaming
-        new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
-        asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-    if conv_id:
-        await save_message(user["id"], conv_id, "assistant", reply)
-    return {"reply": reply}
-
-
-# LAZY LOADING FOR VISION
-vision_model = None
-
-
-def get_vision_model():
-    global vision_model
-    if vision_model is None:
-        from ultralytics import YOLO
-        import torch
-        logger.info("Loading YOLO model...")
-        vision_model = YOLO("yolov8n.pt")
-        if torch.cuda.is_available():
-            vision_model.to("cuda")
-    return vision_model
-
-
 # =========================
 # ENDPOINTS
 # =========================
-@app.options("/{full_path:path}")
-async def preflight_handler(full_path: str):
-    return Response(status_code=200)
-
-@app.get("/robots.txt")
-def robots():
-    return PlainTextResponse("User-agent: *\nDisallow:")
-
-@app.get("/")
-async def root():
-    return {
-        "status": "running",
-        "service": "HeloxAi Backend",
-        "version": "2.1.0",
-        "features": {
-            "intent_detection": "advanced",
-            "user_recognition": "production-grade",
-            "file_handling": "comprehensive",
-            "session_management": "persistent",
-            "memory": "fixed",
-            "models": {
-                "llm": "llama-3.1-405b-reasoning",
-                "tts": "elevenlabs-multilingual-v2",
-                "stt": "elevenlabs"
-            }
-        }
-    }
-
 
 @app.post("/ask/universal")
 async def ask_universal(req: Request, res: Response):
@@ -2375,7 +2085,16 @@ async def ask_universal(req: Request, res: Response):
         )
 
     try:
-        await save_message(user["id"], conv_id, "user", prompt)
+        await _execute_supabase_with_retry(
+            supabase.table("messages").insert({
+                "id": str(uuid.uuid4()),
+                "conversation_id": conv_id,
+                "role": "user",
+                "content": prompt,
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }),
+            description="Save User Message"
+        )
     except Exception as e:
         logger.error(f"Failed to save user message: {e}")
 
@@ -2394,41 +2113,39 @@ async def ask_universal(req: Request, res: Response):
     else:
         logger.info(f"[INTENT] action=general (no specific intent)")
 
-    handler_map = {
-        "image": handle_image_generation,
-        "video": handle_video_generation,
-        "code": handle_code_assistant,
-        "document": handle_text_analysis,
-        "data": handle_text_analysis,
-        "web": handle_code_assistant,
-        "api": handle_code_assistant,
-        "database": handle_code_assistant,
-    }
+    # 1. MATH (Wolfram Alpha)
+    if intent_result.intent == IntentCategory.MATHEMATICAL:
+        async def math_gen():
+            yield sse({"type": "status", "message": "Calculating with Wolfram Alpha..."})
+            try:
+                result = await solve_math(prompt)
+                # Simulate streaming for math result
+                for char in result:
+                    yield sse({"type": "token", "text": char})
+                    await asyncio.sleep(0.01)
+                yield sse({"type": "done"})
+            except Exception as e:
+                yield sse({"type": "error", "message": str(e)})
+        return StreamingResponse(math_gen(), media_type="text/event-stream")
 
-    handler = handler_map.get(action_type)
+    # 2. CODE EXECUTION (Judge0)
+    if intent_result.intent == IntentCategory.CODE_EXECUTION:
+        # Extract code block
+        match = re.search(r"```(\w+)?\n(.*?)```", prompt, re.DOTALL)
+        code = match.group(2) if match else prompt
+        lang = match.group(1) if match and match.group(1) else "python"
+        
+        async def exec_gen():
+            yield sse({"type": "status", "message": f"Executing {lang} code..."})
+            try:
+                res = await execute_code(code, lang)
+                yield sse({"type": "exec_result", "data": res})
+                yield sse({"type": "done"})
+            except Exception as e:
+                yield sse({"type": "error", "message": str(e)})
+        return StreamingResponse(exec_gen(), media_type="text/event-stream")
 
-    if handler:
-        if action_type in ("document", "data"):
-            return await handler(prompt, stream, user_prompt=prompt)
-        else:
-            return await handler(prompt, user, conv_id, stream)
-
-    if action_type == "math":
-        return await handle_math_request(prompt, user, conv_id, stream)
-
-    if action_type == "research":
-        return await handle_research_request(prompt, user, conv_id, stream)
-
-    if action_type == "creative":
-        return await handle_creative_request(prompt, user, conv_id, stream)
-
-    if action_type == "translation":
-        return await handle_translation_request(prompt, user, conv_id, stream)
-
-    if action_type == "summary":
-        return await handle_summary_request(prompt, user, conv_id, stream)
-
-    # DEFAULT CHAT
+    # 3. DEFAULT CHAT (Llama 405B)
     if stream:
         async def event_gen():
             task = asyncio.current_task()
@@ -2436,7 +2153,7 @@ async def ask_universal(req: Request, res: Response):
 
             try:
                 try:
-                    history = await get_history(conv_id)
+                    history = await get_history(conv_id) if conv_id else []
                 except Exception as e:
                     logger.error(f"History fetch failed: {e}")
                     history = [] 
@@ -2463,7 +2180,16 @@ async def ask_universal(req: Request, res: Response):
                 asyncio.create_task(update_user_memory(user["id"], new_memory))
 
                 try:
-                    await save_message(user["id"], conv_id, "assistant", full_text)
+                    await _execute_supabase_with_retry(
+                        supabase.table("messages").insert({
+                            "id": str(uuid.uuid4()),
+                            "conversation_id": conv_id,
+                            "role": "assistant",
+                            "content": full_text,
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        }),
+                        description="Save Assistant Message"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to save assistant message: {e}")
                 
@@ -2478,6 +2204,7 @@ async def ask_universal(req: Request, res: Response):
 
         return StreamingResponse(event_gen(), media_type="text/event-stream")
     else:
+        # Non-streaming fallback
         history = await get_history(conv_id)
         base_system = get_system_prompt(prompt)
         user_memory = user.get("memory", "")
@@ -2495,24 +2222,36 @@ async def ask_universal(req: Request, res: Response):
             r.raise_for_status()
             reply = r.json()["choices"][0]["message"]["content"]
             
+            # Update memory
             new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
+            if len(new_memory) > 5000:
+                new_memory = new_memory[-5000:]
             asyncio.create_task(update_user_memory(user["id"], new_memory))
             
-            await save_message(user["id"], conv_id, "assistant", reply)
+            await _execute_supabase_with_retry(
+                supabase.table("messages").insert({
+                    "id": str(uuid.uuid4()),
+                    "conversation_id": conv_id,
+                    "role": "assistant",
+                    "content": reply,
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }),
+                description="Save Assistant Message"
+            )
+            
             return {"reply": reply}
 
 
 # =========================
 # ENHANCED FILE ANALYSIS ENDPOINT
 # =========================
-@app.post("/analysis")
+@app.post("/analyze/file")
 async def analyze_file(
     req: Request,
     file: UploadFile = File(...),
     stream: bool = True
 ):
-    """
-    Enhanced file analysis endpoint supporting:
+    """Enhanced file analysis endpoint supporting:
     - All code files (.py, .js, .ts, .java, .cpp, .go, .rs, etc.)
     - Archives (.zip, .tar, .gz, etc.) - extracts and analyzes contents
     - Documents (.pdf, .txt, .md, .csv, etc.)
@@ -2823,846 +2562,9 @@ Format complex equations clearly using LaTeX-style notation where appropriate.""
     return {"reply": reply}
 
 
-async def handle_research_request(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
-    system_prompt = get_system_prompt(prompt) + """
-
-You are also a research assistant. When helping with research:
-1. Provide well-structured, factual information
-2. Cite sources when possible (even if general)
-3. Present multiple perspectives on controversial topics
-4. Identify gaps in current knowledge
-5. Suggest further areas of investigation
-Be thorough but concise."""
-
-    user_memory = user.get("memory", "")
-    if user_memory:
-        system_prompt += f"\n\nUser Context: {user_memory}"
-
-    history = await get_history(conv_id) if conv_id else []
-    messages = [{"role": "system", "content": system_prompt}] + history
-
-    if stream:
-        async def gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                full_text = ""
-                async for token in stream_groq_chat(messages, max_tokens=2048):
-                    if task.cancelled():
-                        break
-                    full_text += token
-                    yield sse({"type": "token", "text": token})
-                
-                # MEMORY UPDATE
-                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-                try:
-                    await save_message(user["id"], conv_id, "assistant", full_text)
-                except Exception as e:
-                    logger.error(f"Failed to save assistant message: {e}")
-
-                yield sse({"type": "done"})
-            
-            except Exception as e:
-                logger.error(f"Research Stream Error: {e}")
-                yield sse({"type": "error", "message": "An error occurred."})
-            
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=get_groq_headers(),
-            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
-        )
-        r.raise_for_status()
-        reply = r.json()["choices"][0]["message"]["content"]
-
-    # MEMORY UPDATE
-    new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
-    asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-    await save_message(user["id"], conv_id, "assistant", reply)
-    return {"reply": reply}
-
-
-async def handle_creative_request(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
-    system_prompt = get_system_prompt(prompt) + """
-
-You are also a creative writing expert. When writing creative content:
-1. Use vivid, engaging language
-2. Create compelling characters and narratives
-3. Pay attention to rhythm and flow
-4. Match the requested style or genre
-5. Be original and imaginative
-Adapt your style to the specific creative request."""
-
-    user_memory = user.get("memory", "")
-    if user_memory:
-        system_prompt += f"\n\nUser Context: {user_memory}"
-
-    history = await get_history(conv_id) if conv_id else []
-    messages = [{"role": "system", "content": system_prompt}] + history
-
-    if stream:
-        async def gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                full_text = ""
-                async for token in stream_groq_chat(messages, max_tokens=2048):
-                    if task.cancelled():
-                        break
-                    full_text += token
-                    yield sse({"type": "token", "text": token})
-                
-                # MEMORY UPDATE
-                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-                try:
-                    await save_message(user["id"], conv_id, "assistant", full_text)
-                except Exception as e:
-                    logger.error(f"Failed to save assistant message: {e}")
-
-                yield sse({"type": "done"})
-            
-            except Exception as e:
-                logger.error(f"Creative Stream Error: {e}")
-                yield sse({"type": "error", "message": "An error occurred."})
-            
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=get_groq_headers(),
-            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
-        )
-        r.raise_for_status()
-        reply = r.json()["choices"][0]["message"]["content"]
-
-    # MEMORY UPDATE
-    new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
-    asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-    await save_message(user["id"], conv_id, "assistant", reply)
-    return {"reply": reply}
-
-
-async def handle_translation_request(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
-    system_prompt = get_system_prompt(prompt) + """
-
-You are also a professional translator. When translating:
-1. Preserve the meaning and tone of the original
-2. Use natural, idiomatic language in the target
-3. Handle cultural nuances appropriately
-4. Maintain formatting where possible
-5. If unsure about context, provide alternatives
-Always indicate the source and target languages."""
-
-    user_memory = user.get("memory", "")
-    if user_memory:
-        system_prompt += f"\n\nUser Context: {user_memory}"
-
-    history = await get_history(conv_id) if conv_id else []
-    messages = [{"role": "system", "content": system_prompt}] + history
-
-    if stream:
-        async def gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                full_text = ""
-                async for token in stream_groq_chat(messages):
-                    if task.cancelled():
-                        break
-                    full_text += token
-                    yield sse({"type": "token", "text": token})
-                
-                # MEMORY UPDATE
-                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-                try:
-                    await save_message(user["id"], conv_id, "assistant", full_text)
-                except Exception as e:
-                    logger.error(f"Failed to save assistant message: {e}")
-
-                yield sse({"type": "done"})
-            
-            except Exception as e:
-                logger.error(f"Translation Stream Error: {e}")
-                yield sse({"type": "error", "message": "An error occurred."})
-            
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=get_groq_headers(),
-            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
-        )
-        r.raise_for_status()
-        reply = r.json()["choices"][0]["message"]["content"]
-
-    # MEMORY UPDATE
-    new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
-    asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-    await save_message(user["id"], conv_id, "assistant", reply)
-    return {"reply": reply}
-
-
-async def handle_summary_request(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
-    system_prompt = get_system_prompt(prompt) + """
-
-You are also a summarization expert. When summarizing:
-1. Extract the most important points
-2. Maintain accuracy - don't add information
-3. Be concise but complete
-4. Use bullet points for clarity when appropriate
-5. Start with a brief overview, then key points
-Tailor the summary length to the complexity of the content."""
-
-    user_memory = user.get("memory", "")
-    if user_memory:
-        system_prompt += f"\n\nUser Context: {user_memory}"
-
-    history = await get_history(conv_id) if conv_id else []
-    messages = [{"role": "system", "content": system_prompt}] + history
-
-    if stream:
-        async def gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                full_text = ""
-                async for token in stream_groq_chat(messages):
-                    if task.cancelled():
-                        break
-                    full_text += token
-                    yield sse({"type": "token", "text": token})
-                
-                # MEMORY UPDATE
-                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-                try:
-                    await save_message(user["id"], conv_id, "assistant", full_text)
-                except Exception as e:
-                    logger.error(f"Failed to save assistant message: {e}")
-
-                yield sse({"type": "done"})
-            
-            except Exception as e:
-                logger.error(f"Summary Stream Error: {e}")
-                yield sse({"type": "error", "message": "An error occurred."})
-            
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(gen(), media_type="text/event-stream")
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=get_groq_headers(),
-            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
-        )
-        r.raise_for_status()
-        reply = r.json()["choices"][0]["message"]["content"]
-
-    # MEMORY UPDATE
-    new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
-    asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-    await save_message(user["id"], conv_id, "assistant", reply)
-    return {"reply": reply}
-
-
-# =========================
-# CHAT MANAGEMENT ENDPOINTS
-# =========================
-@app.post("/newchat")
-async def new_chat(req: Request, res: Response):
-    user = await get_user(req, res)
-    cid = str(uuid.uuid4())
-    await _execute_supabase_with_retry(
-        supabase.table("conversations").insert({
-            "id": cid, "user_id": user["id"],
-            "title": "New Chat", "created_at": datetime.now(timezone.utc).isoformat()
-        }),
-        description="New Chat"
-    )
-    return {"conversation_id": cid}
-
-
-@app.post("/stop")
-async def stop_generation(req: Request, res: Response):
-    user = await get_user(req, res)
-    user_id = user["id"]
-
-    task = active_streams.get(user_id)
-    if task and not task.done():
-        task.cancel()
-        active_streams.pop(user_id, None)
-        return {"status": "stopped"}
-    return {"status": "no_active_stream"}
-
-
-@app.post("/regenerate")
-async def regenerate(req: Request, res: Response):
-    body = await req.json()
-    conv_id = body.get("conversation_id")
-
-    user = await get_user(req, res)
-    user_id = user["id"]
-
-    if not conv_id:
-        raise HTTPException(400, "conversation_id required")
-
-    msgs = await _execute_supabase_with_retry(
-        supabase.table("messages")
-        .select("*")
-        .eq("conversation_id", conv_id)
-        .order("created_at", desc=True)
-        .limit(10),
-        description="Regenerate History Lookup"
-    )
-
-    if not msgs.data:
-        raise HTTPException(404, "No messages found")
-
-    last_user_msg = None
-    for m in msgs.data:
-        if m["role"] == "user":
-            last_user_msg = m
-            break
-
-    if not last_user_msg:
-        raise HTTPException(400, "No user message to regenerate from")
-
-    await _execute_supabase_with_retry(
-        supabase.table("messages")
-        .delete()
-        .gt("created_at", last_user_msg["created_at"])
-        .eq("role", "assistant")
-        .eq("conversation_id", conv_id),
-        description="Delete Old Assistant Message"
-    )
-
-    async def event_gen():
-        task = asyncio.current_task()
-        active_streams[user_id] = task
-        try:
-            history = await get_history(conv_id)
-            
-            last_prompt = last_user_msg.get("content", "")
-            base_system = get_system_prompt(last_prompt)
-            user_memory = user.get("memory", "")
-            if user_memory:
-                base_system += f"\n\nUser Context: {user_memory}"
-            full_history = [{"role": "system", "content": base_system}] + history
-            
-            full_text = ""
-            async for token in stream_groq_chat(full_history):
-                if task and task.cancelled():
-                    break
-                full_text += token
-                yield sse({"type": "token", "text": token})
-
-            # MEMORY UPDATE
-            new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
-            asyncio.create_task(update_user_memory(user["id"], new_memory))
-
-            try:
-                await save_message(user_id, conv_id, "assistant", full_text)
-            except Exception as e:
-                logger.error(f"Failed to save assistant message: {e}")
-
-            yield sse({"type": "done"})
-        
-        except Exception as e:
-            logger.error(f"Regenerate Stream Error: {e}")
-            yield sse({"type": "error", "message": "An error occurred."})
-        
-        finally:
-            active_streams.pop(user_id, None)
-
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
-
-
-@app.get("/chats")
-async def list_chats(req: Request, res: Response):
-    user = await get_user(req, res)
-    
-    result = await _execute_supabase_with_retry(
-        supabase.table("conversations")
-        .select("*")
-        .eq("user_id", user["id"])
-        .order("updated_at", desc=True),
-        description="List Chats"
-    )
-    return {"chats": result.data or []}
-
-
-# =========================
-# USER IDENTITY ENDPOINT
-# =========================
-@app.get("/user/info")
-async def get_user_info(req: Request, res: Response):
-    user = await get_user(req, res)
-    return {
-        "user_id": user["id"],
-        "fingerprint": user.get("fingerprint", "")[:8] + "...",
-        "is_identified": True,
-        "session_valid": user.get("session_valid", False),
-        "is_authenticated": bool(user.get("email") and not user["email"].startswith("anon+"))
-    }
-
-
-@app.post("/user/merge")
-async def merge_user(req: Request, res: Response):
-    body = await req.json()
-    target_id = body.get("target_user_id")
-    
-    user = await get_user(req, res)
-    
-    if not target_id or target_id == user["id"]:
-        return {"status": "no_merge_needed"}
-    
-    try:
-        await _execute_supabase_with_retry(
-            supabase.table("conversations")
-            .update({"user_id": target_id})
-            .eq("user_id", user["id"]),
-            description="Merge Conversations"
-        )
-        
-        await _execute_supabase_with_retry(
-            supabase.table("messages")
-            .update({"user_id": target_id})
-            .eq("user_id", user["id"]),
-            description="Merge Messages"
-        )
-        
-        fingerprint = user.get("fingerprint", "")
-        session_token = await create_user_session(target_id, fingerprint, True)
-        set_session_cookies(res, target_id, fingerprint, session_token, True)
-        
-        return {"status": "merged", "new_user_id": target_id}
-    
-    except Exception as e:
-        logger.error(f"User merge failed: {e}")
-        raise HTTPException(500, "Failed to merge user data")
-
-
-# =========================
-# INTENT ANALYSIS ENDPOINT
-# =========================
-@app.post("/analyze-intent")
-async def analyze_intent_endpoint(req: Request):
-    body = await req.json()
-    prompt = body.get("prompt", "")
-
-    if not prompt:
-        raise HTTPException(400, "Prompt required")
-
-    intent_result = detect_intent(prompt)
-    action_type = get_action_type(prompt)
-    required_tools = get_required_tools(prompt)
-
-    return {
-        "intent": intent_result.to_dict() if intent_result else None,
-        "action_type": action_type,
-        "required_tools": required_tools,
-        "confidence": intent_result.confidence if intent_result else 0.0
-    }
-
-
-# =========================
-# MEDIA ENDPOINTS (ELEVENLABS UPGRADE)
-# =========================
-
-@app.post("/tts")
-async def text_to_speech(req: Request):
-    data = await req.json()
-    text = data.get("text")
-    voice_id = data.get("voice", "21m00Tcm4TlvDq8ikWAM") # Default: Rachel
-
-    if not text:
-        raise HTTPException(400, "text required")
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(500, "ElevenLabs API Key missing")
-
-    # ElevenLabs Voice Mapping for compatibility
-    # Maps the "generic" voice names used in the original code to specific ElevenLabs IDs if needed
-    # Or just pass the ID directly. 
-    # Using ElevenLabs Multilingual v2 model for high quality.
-    
-    async with httpx.AsyncClient(timeout=60) as client:
-        try:
-            # Endpoint for Text-to-Speech
-            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-            
-            headers = {
-                "xi-api-key": ELEVENLABS_API_KEY,
-                "Content-Type": "application/json"
-            }
-
-            payload = {
-                "text": text,
-                "model_id": "eleven_multilingual_v2",
-                "voice_settings": {
-                    "stability": 0.5,
-                    "similarity_boost": 0.75
-                }
-            }
-            
-            r = await client.post(url, headers=headers, json=payload)
-            r.raise_for_status()
-            
-            return Response(content=r.content, media_type="audio/mpeg")
-            
-        except httpx.HTTPStatusError as e:
-            logger.error(f"ElevenLabs TTS error: {e.response.status_code} - {e.response.text}")
-            return JSONResponse(
-                status_code=e.response.status_code,
-                content={"error": e.response.text}
-            )
-
-@app.get("/tts/voices")
-async def get_voices():
-    # Returns a curated list of ElevenLabs voices compatible with the client
-    return {
-        "voices": [
-            {"id": "21m00Tcm4TlvDq8ikWAM", "name": "Rachel"},
-            {"id": "AZnzlk1XvdvUeBnXmlld", "name": "Domi"},
-            {"id": "EXAVITQu4vr4xnSDxMaL", "name": "Bella"},
-            {"id": "ErXwobaRiVQHn1TqBp", "name": "Antoni"},
-            {"id": "MF3mGyEgrClXGD7RHPK", "name": "Elli"},
-            {"id": "TxGEqnHWrfWFTfGW9NG", "name": "Josh"},
-            {"id": "VR6AewLTigWG4XSOZ9p", "name": "Arnold"},
-            {"id": "pNInz6obpgDQGzWfYDT", "name": "Adam"},
-            {"id": "yoZ06aMxZKG28L3CgAI", "name": "Sam"}
-        ]
-    }
-
-
-@app.post("/stt")
-async def speech_to_text(file: UploadFile = File(...)):
-    if not ELEVENLABS_API_KEY:
-        raise HTTPException(500, "ElevenLabs API Key missing")
-
-    content = await file.read()
-    
-    async with httpx.AsyncClient(timeout=120) as client:
-        try:
-            # ElevenLabs STT Endpoint
-            url = "https://api.elevenlabs.io/v1/speech-to-text"
-            
-            headers = {
-                "xi-api-key": ELEVENLABS_API_KEY
-            }
-            
-            # ElevenLabs expects the file in 'file' and model id
-            data = {
-                "model_id": "eleven_multilingual_v2"
-            }
-            
-            files = {"file": (file.filename, content, file.content_type)}
-            
-            r = await client.post(url, headers=headers, data=data, files=files)
-            r.raise_for_status()
-            
-            return r.json()
-            
-        except httpx.HTTPStatusError as e:
-            logger.error(f"ElevenLabs STT error: {e.response.status_code} - {e.response.text}")
-            return JSONResponse(
-                status_code=e.response.status_code,
-                content={"error": e.response.text}
-            )
-
-
-# =========================
-# MEDIA GENERATION HANDLERS
-# =========================
-async def handle_image_generation(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool, style: str = None, size: str = "1024x1024", num_images: int =1):
-    MAX_PROMPT_LEN = 4000 
-    if not OPENAI_API_KEY:
-        msg = "No API Key"
-        async def err_gen():
-            yield sse({"type": "error", "message": msg})
-        if stream: return StreamingResponse(err_gen(), media_type="text/event-stream")
-        return {"error": msg}
-    
-    if not prompt or not prompt.strip(): 
-        raise HTTPException(400, "Prompt is required")
-    
-    if len(prompt) > MAX_PROMPT_LEN: 
-        prompt = prompt[:MAX_PROMPT_LEN]
-    
-    num_images =1
-    
-    STYLES = {
-        "realistic": "ultra realistic, 4k, highly detailed", 
-        "cartoon": "cartoon style, vibrant colors", 
-        "anime": "anime style", 
-        "cinematic": "cinematic lighting", 
-        "cyberpunk": "cyberpunk, neon"
-    }
-    
-    if style in STYLES: 
-        prompt = f"{prompt}, {STYLES[style]}"
-    
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(
-                "https://api.openai.com/v1/images/generations", 
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, 
-                json={"model": "dall-e-3", "prompt": prompt, "size": size, "n": num_images}
-            )
-            r.raise_for_status()
-            data = r.json()
-            
-    except httpx.HTTPStatusError as e:
-        # Parse the JSON response to get the specific error message
-        user_facing_msg = "Image generation failed. Please try a different prompt."
-        
-        try:
-            error_json = e.response.json()
-            # Extract specific "message" field from OpenAI's error structure
-            # Structure: { "error": { "message": "...", "code": "..." } }
-            if "error" in error_json and "message" in error_json["error"]:
-                user_facing_msg = error_json["error"]["message"]
-            else:
-                user_facing_msg = e.response.text
-        except Exception:
-            # Fallback if JSON parsing fails
-            user_facing_msg = f"Service error ({e.response.status_code})."
-            
-        logger.error(f"Image gen HTTP error {e.response.status_code}: {user_facing_msg}")
-        
-        async def err_gen():
-            yield sse({"type": "error", "message": user_facing_msg})
-        
-        if stream: return StreamingResponse(err_gen(), media_type="text/event-stream")
-        return {"error": user_facing_msg}
-        
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Image gen unexpected error: {error_msg}")
-        async def err_gen():
-            yield sse({"type": "error", "message": "An unexpected error occurred."})
-        if stream: return StreamingResponse(err_gen(), media_type="text/event-stream")
-        return {"error": error_msg}
-    
-    # Process successful response
-    images = []
-    try:
-        for item in data.get("data", []):
-            b64 = item.get("b64_json")
-            url = item.get("url")
-            if url: 
-                images.append({"url": url})
-            elif b64:
-                img_bytes = base64.b64decode(b64)
-                try:
-                    fname = f"{uuid.uuid4().hex}.png"
-                    path = f"public/{fname}"
-                    await asyncio.to_thread(
-                        lambda: supabase.storage.from_("ai-images").upload(path, img_bytes, {"content-type": "image/png"})
-                    )
-                    url = f"{SUPABASE_URL}/storage/v1/object/public/ai-images/{path}"
-                    images.append({"url": url})
-                except Exception as upload_err:
-                    logger.error(f"Failed to upload image to storage: {upload_err}")
-                    images.append({"url": f"data:image/png;base64,{b64}"})
-    except Exception as e:
-        logger.error(f"Failed to parse image response: {e}")
-        msg = "Failed to process generated image."
-        async def err_gen():
-            yield sse({"type": "error", "message": msg})
-        if stream: return StreamingResponse(err_gen(), media_type="text/event-stream")
-        return {"error": msg}
-    
-    if stream:
-        async def event_gen():
-            yield sse({"type": "images", "images": images})
-            yield sse({"type": "done"})
-        return StreamingResponse(event_gen(), media_type="text/event-stream")
-    
-    return {"images": images}
-    
-async def handle_video_generation(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
-    """
-    Updated video handler with Model Routing.
-    Routes to Luma for Realistic, Pika for Anime/Cartoon.
-    """
-    
-    # 1. Detect Style
-    # Simple keyword check or use your existing intent detector
-    # (Assuming you might update IntentDetector to detect 'anime' vs 'realistic')
-    prompt_lower = prompt.lower()
-    is_anime = any(k in prompt_lower for k in ['anime', 'manga', 'cartoon', '2d animation', 'studio ghibli'])
-    
-    # 2. Select Model based on intent
-    if is_anime:
-        # Use Pika for Anime/Cartoon styles
-        MODEL_VERSION = "pika-labs/pika-1.0" 
-        model_name = "Pika"
-    else:
-        # Use Luma Dream Machine for Realistic/Cinematic/General
-        MODEL_VERSION = "luma-dream-machine"
-        model_name = "Luma"
-
-    headers = {"Authorization": f"Token {REPLICATE_API_TOKEN}", "Content-Type": "application/json"}
-    
-    async def gen():
-        try:
-            yield sse({"type": "status", "message": f"Initializing {model_name} AI..."})
-            
-            async with httpx.AsyncClient(timeout=300) as client:
-                # NOTE: Inputs differ slightly between models. 
-                # Luma usually takes: prompt, loop, aspect_ratio.
-                # Pika takes: prompt, frame_rate, motion_bucket_id.
-                
-                input_payload = {"prompt": prompt}
-                
-                if model_name == "Luma":
-                    input_payload["loop"] = False
-                    # Luma supports specific aspect ratios like "16:9", "9:16"
-                    if "vertical" in prompt_lower or "portrait" in prompt_lower or "phone" in prompt_lower:
-                        input_payload["aspect_ratio"] = "9:16"
-                    else:
-                        input_payload["aspect_ratio"] = "16:9"
-                
-                elif model_name == "Pika":
-                    # Pika specific settings
-                    input_payload["frame_rate"] = 24
-                    # Higher motion_bucket_id = more movement (0-255)
-                    input_payload["motion_bucket_id"] = 150 
-                
-                r = await client.post(
-                    "https://api.replicate.com/v1/predictions", 
-                    headers=headers, 
-                    json={"version": MODEL_VERSION, "input": input_payload}
-                )
-                
-                if r.status_code == 402:
-                     logger.error(f"Video gen billing error (402): Insufficient credits.")
-                     yield sse({"type": "error", "message": "Video generation requires paid credits on Replicate."})
-                     return
-
-                r.raise_for_status()
-                prediction = r.json()
-                prediction_id = prediction["id"]
-                
-                yield sse({"type": "status", "message": f"Generating video ({model_name})..."})
-                
-                poll_count = 0
-                while poll_count < 180: # Luma can take longer, 6 mins max
-                    r = await client.get(f"https://api.replicate.com/v1/predictions/{prediction_id}", headers=headers)
-                    r.raise_for_status()
-                    data = r.json()
-                    
-                    if data["status"] == "succeeded":
-                        raw_video_url = data["output"]
-                        
-                        # Handle list outputs (some models return a list)
-                        if isinstance(raw_video_url, list):
-                            raw_video_url = raw_video_url[0]
-                            
-                        yield sse({"type": "status", "message": "Applying watermark..."})
-                        
-                        # Only watermark if user is not premium (optional logic)
-                        watermarked_url = await add_watermark_to_video(raw_video_url)
-                        
-                        yield sse({"type": "video", "url": watermarked_url})
-                        yield sse({"type": "done"})
-                        return
-                    
-                    elif data["status"] == "failed":
-                        error_detail = data.get('error', 'Unknown error')
-                        logger.error(f"{model_name} prediction failed: {error_detail}")
-                        yield sse({"type": "error", "message": f"Video generation failed: {error_detail}"})
-                        return
-                    
-                    poll_count +=1
-                    await asyncio.sleep(2)
-                
-                yield sse({"type": "error", "message": "Video generation timed out."})
-                
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Video gen HTTP error: {e.response.status_code} - {e.response.text}")
-            yield sse({"type": "error", "message": f"Service error: {e.response.status_code}"})
-        except Exception as e:
-            logger.error(f"Video gen unexpected error: {e}", exc_info=True)
-            yield sse({"type": "error", "message": str(e)})
-    
-    return StreamingResponse(gen(), media_type="text/event-stream")
-    
-# =========================
-# DATABASE MIGRATION HELPER
-# =========================
-@app.get("/setup/sessions-table")
-async def setup_sessions_table():
-    """
-    SQL to create the user_sessions table.
-    Run this in your Supabase SQL editor.
-    """
-    sql = """
-    -- Create user_sessions table for production-grade session management
-    CREATE TABLE IF NOT EXISTS user_sessions (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        token TEXT NOT NULL,
-        fingerprint TEXT,
-        user_agent TEXT,
-        ip_address TEXT,
-        expires_at TIMESTAMPTZ NOT NULL,
-        is_valid BOOLEAN DEFAULT TRUE,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        updated_at TIMESTAMPTZ DEFAULT NOW()
-    );
-
-    -- Index for fast token lookups
-    CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions(user_id, token);
-    CREATE INDEX IF NOT EXISTS idx_user_sessions_valid ON user_sessions(user_id, is_valid) WHERE is_valid = TRUE;
-    CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions(expires_at);
-
-    -- Enable RLS
-    ALTER TABLE user_sessions ENABLE ROW LEVEL SECURITY;
-
-    -- IMPORTANT: Since we are using Service Key for backend logic, we must allow the service role (or anon if we switch back) to manage these.
-    -- However, standard RLS policies for 'users' table usually block anon inserts.
-    -- Since we are using a custom backend with SERVICE KEY, we can technically bypass RLS,
-    -- but having the policies ensures safety if keys leak.
-    
-    -- Policy: Service Role (or backend) can do anything
-    CREATE POLICY "Service full access" ON user_sessions
-        USING (true) WITH CHECK (true);
-
-    -- Clean up expired sessions automatically (run as scheduled job)
-    -- CREATE OR REPLACE FUNCTION clean_expired_sessions()
-    -- RETURNS void AS $$     -- BEGIN
-    --     UPDATE user_sessions SET is_valid = FALSE WHERE expires_at < NOW() AND is_valid = TRUE;
-    -- END;
-    -- $$ LANGUAGE plpgsql;
-    """
-    return {"sql": sql, "note": "Run this SQL in your Supabase SQL editor"}
+@app.get("/health")
+def health():
+    return {"status": "healthy", "services": {"groq_llama405b": bool(GROQ_API_KEY), "judge0": bool(JUDGE0_API_KEY), "wolfram": bool(WOLFRAM_ALPHA_API_KEY)}}
 
 if __name__ == "__main__":
     import uvicorn
