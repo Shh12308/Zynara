@@ -5,27 +5,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 ENV PYTHONUNBUFFERED=1
 
-# 2. System Updates & Dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    git \
-    git-lfs \
+# 2. Install ONLY Python (No ffmpeg, no tesseract, no poppler)
+# These extra packages were causing your build to crash.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     python3.10 \
     python3.10-venv \
     python3-dev \
-    ffmpeg \
-    libsm6 \
-    libxext6 \
-    libgl1 \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    tesseract-ocr \
-    tesseract-ocr-eng \
-    libpoppler-cpp-dev \
-    poppler-utils \
-    libxml2-dev \
-    libxslt1.1-dev \
-    antiword \
     && rm -rf /var/lib/apt/lists/*
 
 # 3. Setup Python Environment
@@ -35,22 +21,20 @@ ENV PATH="/opt/venv/bin:$PATH"
 # 4. Upgrade Pip
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# 5. Copy Requirements and Install Python Libraries
+# 5. Copy Requirements and Install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 6. Setup Workdir
 WORKDIR /app
-
-# 7. Copy Application Code
 COPY . .
 
-# 8. Create Non-Root User (Optional but recommended)
+# 7. Create Non-Root User
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# 9. Expose Port
+# 8. Expose Port
 EXPOSE 8000
 
-# 10. Start Command
+# 9. Start Command
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
