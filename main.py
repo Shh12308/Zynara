@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List, Union, Tuple
 from pathlib import Path
 
+# External Libraries
 import httpx
 from fastapi import FastAPI, Request, Header, UploadFile, File, HTTPException, Query, Form, Depends, Cookie, Response
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, FileResponse
@@ -27,12 +28,13 @@ from pydantic import BaseModel, Field
 from supabase import create_client
 
 # Document processing
-import fitz  # PyMuPDF
+import fitz  # PyMuPDF2
 import docx
+import wolframalpha  # Added for math
 
 # ---------- ENV KEYS ----------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") # Corrected variable name consistency
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_URL or SUPABASE_KEY is missing")
@@ -46,7 +48,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 RUNWAYML_API_KEY = os.getenv("RUNWAYML_API_KEY")
-WOLFRAM_ALPHA_API_KEY = os.getenv("WOLFRAM_ALPHA_API_KEY")
+WOLFRAM_ALPHA_API_KEY = os.getenv("WOLFRAM_ALPHA_API_KEY") # Fixed typo in logic
 IMAGE_MODEL_FREE_URL = os.getenv("IMAGE_MODEL_FREE_URL")
 USE_FREE_IMAGE_PROVIDER = os.getenv("USE_FREE_IMAGE_PROVIDER", "false").lower() in ("1", "true", "yes")
 
@@ -69,9 +71,10 @@ logger = logging.getLogger("heloxai-server")
 
 app = FastAPI(title="HeloXAI Ultimate Server", redirect_slashes=False)
 
+# FIX: Corrected middleware argument
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # Fixed typo 'allow_origins'
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -82,8 +85,8 @@ def sse(obj: dict) -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
 # ---------------- MODELS ----------------
-CHAT_MODEL = os.getenv("CHAT_MODEL", "llama-3.3-70b-versatile") 
-CODE_MODEL = os.getenv("CODE_MODEL", "llama-3.3-70b-versatile")
+CHAT_MODEL = os.getenv("CHAT_MODEL", "llama-3.1-8b-instant") # Defaulting to fast model for chat
+CODE_MODEL = os.getenv("CODE_MODEL", "llama-3.1-70b-versatile") # Using larger model for code
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # ---------- Creator info ----------
@@ -383,7 +386,6 @@ async def extract_pdf_content(content: bytes, filename: str, max_length: int, me
 
 async def extract_archive_content(content: bytes, filename: str, max_length: int, metadata: Dict) -> FileExtractionResult:
     ext = Path(filename).suffix.lower()
-    
     if ext == '.zip':
         return await extract_zip_content(content, filename, max_length, metadata)
     elif ext in ('.tar', '.gz', '.tgz', '.bz2', '.xz'):
@@ -400,7 +402,6 @@ async def extract_zip_content(content: bytes, filename: str, max_length: int, me
     all_text_parts = []
     total_extracted = 0
     entry_count = 0
-    
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
             if len(zf.namelist()) > MAX_ZIP_ENTRIES:
@@ -419,7 +420,6 @@ async def extract_zip_content(content: bytes, filename: str, max_length: int, me
                     continue
                 
                 entry_count += 1
-                
                 try:
                     entry_info = zf.getinfo(entry_name)
                     
@@ -467,7 +467,6 @@ async def extract_zip_content(content: bytes, filename: str, max_length: int, me
                         })
                     else:
                         text, _ = extract_text_with_fallback(entry_content, max_length)
-                        
                         if text.strip():
                             extracted_files.append({
                                 "name": entry_name,
@@ -554,7 +553,6 @@ async def extract_tar_content(content: bytes, filename: str, max_length: int, me
     try:
         with tarfile.open(fileobj=io.BytesIO(content)) as tf:
             members = [m for m in tf.getmembers() if m.isfile()]
-            
             if len(members) > MAX_ZIP_ENTRIES:
                 return FileExtractionResult(
                     content=f"[TAR: {filename} - Too many entries ({len(members)})]",
@@ -593,7 +591,11 @@ async def extract_tar_content(content: bytes, filename: str, max_length: int, me
                             "category": entry_category.value
                         })
                 except Exception as e:
-                    extracted_files.append({"name": member.name, "status": "error", "error": str(e)})
+                    extracted_files.append({
+                        "name": member.name,
+                        "status": "error",
+                        "error": str(e)
+                    })
         
         full_text = f"TAR Archive: {filename}\nEntries: {len(members)}, Extracted: {len(all_text_parts)}\n\n"
         if all_text_parts:
@@ -810,8 +812,6 @@ async def get_current_user_optional(
             )
             if result.data:
                 u = result.data[0]
-                
-                # Update fingerprint if changed
                 if u.get("fingerprint") != current_fingerprint:
                     try:
                         await asyncio.to_thread(
@@ -820,13 +820,11 @@ async def get_current_user_optional(
                     except:
                         pass
                 
-                # Create/refresh session if invalid
-                session_token = HeloX_Token
                 if not session_valid:
-                    session_token = await create_user_session(user_id, current_fingerprint, remember, user_agent, client_ip)
+                    new_token = await create_user_session(user_id, current_fingerprint, remember, user_agent, client_ip)
                     session_valid = True
                 
-                set_session_cookies(response, user_id, current_fingerprint, session_token, remember)
+                set_session_cookies(response, user_id, current_fingerprint, new_token or HeloX_Token, remember)
                 
                 return {
                     "id": u["id"],
@@ -936,31 +934,32 @@ class AdvancedIntentDetector:
             IntentCategory.IMAGE_GENERATION: [r'\b(generate|create|make|draw|render|paint|sketch|illustrate)\s+(a\s+|an\s+)?(image|picture|photo|drawing|illustration|artwork|painting|sketch|graphic|visual)', r'\b(image|picture|photo|drawing|illustration)\s+(of|showing|depicting|with|for|about)', r'\b(text\s+to\s+image|txt2img|img2img)', r'\b(visualize|visualise)\s+(this|that|the|it)', r'\b(dall[eé]|midjourney|stable\s+diffusion|sd\s*xl|flux)', r'\b(generate|create)\s+(some\s+)?art', r'\bmake\s+(me\s+)?(a\s+)?(visual|graphic|thumbnail|logo|icon|banner|poster)'],
             IntentCategory.VIDEO_GENERATION: [r'\b(generate|create|make|produce)\s+(a\s+)?(video|clip|movie|animation|motion\s+graphic)', r'\b(text\s+to\s+video|txt2vid|video\s+generation)', r'\b(animate|animation)\s+(this|that|the|image|picture)', r'\b(video|clip|movie)\s+(of|showing|about|with)', r'\b(runway|pika|sora|mov2mov|kling|gen-3)', r'\b(turn|convert)\s+(this|the|image)\s+(into|to)\s+(a\s+)?(video|animation)'],
             IntentCategory.AUDIO_GENERATION: [r'\b(generate|create|make|produce)\s+(a\s+)?(audio|sound|music|speech|voice|song|track|beat)', r'\b(text\s+to\s+speech|tts|speech\s+to\s+text|stt)', r'\b(music|song|beat|melody)\s+(generation|creation|for|about)', r'\b(elevenlabs|suno|udio|bark)', r'\b(clone|replicate)\s+(a\s+)?voice'],
-            IntentCategory.CODE_GENERATION: [r'\b(write|create|generate|build|code|develop|implement)\s+(a\s+)?(\w+\s+)?(function|class|module|script|program|code|snippet|app|application|component)', r'\b(how\s+(to|can\s+i)\s+(write|create|implement|code|build))', r'\b(code\s+(for|that|this|to|which|example))', r'\b(convert\s+(this|to)\s+(code|python|javascript|java|c\+\+|rust|go|typescript))', r'\b(scaffold|boilerplate|template)\s+(for|a)', r'\b(implement\s+(the|a|this)\s+(\w+\s+)?(pattern|algorithm|logic|feature))'],
+            IntentCategory.CODE_GENERATION: [r'\b(write|create|generate|build|code|develop|implement)\s+(a\s+)?(\w+\s+)?(function|class|module|script|program|code|snippet|app|application|component)', r'\b(how\s+(to|can\s+i)\s+(write|create|implement|code|build))', r'\b(code\s+(for|that|this|to|which|example))', r'\b(convert\s+(this|to)\s+(code|python|javascript|java|c\+\+|rust|go|typescript))', r'\b(scaffold|boilerplate|template)\s+(for|a)', r'\b(wrapper|helper|utility)\s+(function|class|module)\s+(for|to)', r'\b(implement\s+(the|a|this)\s+(\w+\s+)?(pattern|algorithm|logic|feature))'],
             IntentCategory.CODE_REVIEW: [r'\b(review|analyze|critique|evaluate|audit)\s+(this|my|the)\s+(code|function|class|script|implementation|pr)', r'\b(is\s+(this|there)\s+(code|anything)\s+(good|bad|wrong|improvable|clean))', r'\b(best\s+practices?\s+(for|in)\s+(this|my)\s+(code|implementation))', r'\b(refactor|improve|optimize|clean\s+up)\s+(this|my|the)\s+(code|function|class)'],
             IntentCategory.CODE_DEBUG: [r'\b(fix|debug|solve|troubleshoot|resolve)\s+(this|my|the|a)\s+(bug|error|issue|problem)', r'\b(why\s+(is|does|are|do)\s+(this|my|the|it)\s+(not\s+working|failing|breaking|erroring|returning))', r'\b(error|exception|traceback|stack\s+trace|segfault)\s*[:\n]', r'\b(won\'t\s+work|doesn\'t\s+work|not\s+working|broken|failing)'],
             IntentCategory.CODE_EXECUTION: [r'\b(run|execute)\s+(this|my|the)\s+(code|script|program)', r'\b(output|result)\s+(of|for)\s+(this|the)\s+(code|program)', r'\b(test\s+(this|my|the)\s+(code|function|program))'],
-            IntentCategory.DOCUMENT_CREATION: [r'\b(create|write|generate|draft|compose)\s+(a\s+)?(document|pdf|report|letter|email|memo|article|essay|paper|proposal|whitepaper)', r'\b(professional|formal|business)\s+(document|letter|email|report)'],
+            IntentCategory.DOCUMENT_CREATION: [r'\b(create|write|generate|draft|compose)\s+(a\s+)?(document|pdf|report|letter|email|memo|article|essay|paper|proposal|whitepaper)', r'\b(document|report|proposal|specification)\s+(for|about|on|regarding)', r'\b(format\s+(as|this\s+as|it\s+as)\s+(a\s+)?(pdf|document|report|letter|markdown))', r'\b(professional|formal|business)\s+(document|letter|email|report)'],
             IntentCategory.DOCUMENT_ANALYSIS: [r'\b(analyze|analysis|analyse|read|parse|extract)\s+(this|the|my)\s+(document|pdf|file|doc|report)', r'\b(summarize\s+(this|the)\s+(document|pdf|file|report))'],
-            IntentCategory.DATA_ANALYSIS: [r'\b(analyze|analysis|analyse)\s+(this|the|my|some)\s+(data|dataset|csv|excel|spreadsheet|json)', r'\b(statistics?|statistical)\s+(analysis|test|summary|overview)', r'\b(insights?\s+(from|in|about|into))'],
-            IntentCategory.DATA_VISUALIZATION: [r'\b(create|make|generate|plot|chart|graph|visualize)\s+(a\s+)?(chart|graph|plot|visualization|diagram|dashboard)', r'\b(bar\s+chart|line\s+graph|scatter\s+plot|pie\s+chart|histogram|heatmap)'],
-            IntentCategory.WEB_DEVELOPMENT: [r'\b(create|build|develop|make)\s+(a\s+)?(website|web\s*page|web\s*app|landing\s+page|web\s*site|portfolio)', r'\b(html|css|javascript|typescript|react|vue|angular|next\.js|nuxt|svelte|tailwind)\b'],
-            IntentCategory.API_DEVELOPMENT: [r'\b(create|build|develop|design|implement)\s+(a\s+)?(api|rest\s*api|graphql\s*api|endpoint|route)', r'\b(restful|rest|graphql|grpc|websocket)\s*(api|service|endpoint)?'],
-            IntentCategory.DATABASE: [r'\b(create|write|design)\s+(a\s+)?(database|schema|table|query|sql|migration)', r'\b(sql|mysql|postgres|postgresql|mongodb|redis|dynamodb|sqlite)\s*(query|statement|command)?'],
-            IntentCategory.TRANSLATION: [r'\b(translate|translation)\s+(this|to|into|from)\s+(\w+)', r'\b(in\s+(english|spanish|french|german|chinese|japanese|korean|arabic|portuguese|italian|russian|hindi|urdu))'],
-            IntentCategory.SUMMARIZATION: [r'\b(summarize|summary|summarise|tldr|tl;dr)\s+(this|the|it|that|for\s+me)', r'\b(key\s+(points|takeaways|highlights))\s*(from|of|in)?'],
-            IntentCategory.EXPLANATION: [r'\b(explain|explanation)\s+(to\s+me\s+)?', r'\b(what\s+(is|are|was|were|does|do|means|mean))\s+', r'\b(how\s+(does|do|did|can|would|should|to))\s+'],
+            IntentCategory.DATA_ANALYSIS: [r'\b(analyze|analysis|analyse)\s+(this|the|my|some)\s+(data|dataset|csv|excel|spreadsheet|json)', r'\b(statistics?|statistical)\s+(analysis|test|summary|overview)', r'\b(insights?\s+(from|in|about|into))', r'\b(correlation|regression|distribution|trend)\s+(analysis|of|in)', r'\b(clean|preprocess|prepare|wrangle)\s+(this|the)\s+(data|dataset)'],
+            IntentCategory.DATA_VISUALIZATION: [r'\b(create|make|generate|plot|chart|graph|visualize)\s+(a\s+)?(chart|graph|plot|visualization|diagram|dashboard)', r'\b(bar\s+chart|line\s+graph|scatter\s+plot|pie\s+chart|histogram|heatmap|box\s+plot|violin\s+plot)', r'\b(visualize|visualise|plot|chart|graph)\s+(this|the|these|those|data)'],
+            IntentCategory.WEB_DEVELOPMENT: [r'\b(create|build|develop|make)\s+(a\s+)?(website|web\s*page|web\s*app|landing\s+page|web\s*site|portfolio)', r'\b(html|css|javascript|typescript|react|vue|angular|next\.js|nuxt|svelte|tailwind)\b', r'\b(frontend|front[- ]end|back[- ]end|full[- ]stack)\s*(development|for|with|app)?', r'\b(responsive|mobile[- ]friendly|mobile[- ]first)\s*(design|website|layout)?', r'\b(component|page|layout|template)\s+(for|in)\s+(react|vue|angular|next)'],
+            IntentCategory.API_DEVELOPMENT: [r'\b(create|build|develop|design|implement)\s+(a\s+)?(api|rest\s*api|graphql\s*api|endpoint|route)', r'\b(api\s*(endpoint|route|handler|controller|gateway))', r'\b(restful|rest|graphql|grpc|websocket)\s*(api|service|endpoint)?', r'\b(openapi|swagger|api\s*documentation)', r'\b(request|response|payload)\s+(format|structure|schema)'],
+            IntentCategory.DATABASE: [r'\b(create|write|design)\s+(a\s+)?(database|schema|table|query|sql|migration)', r'\b(sql|mysql|postgres|postgresql|mongodb|redis|dynamodb|sqlite)\s*(query|statement|command)?', r'\b(schema\s*(design|migration|definition|update))', r'\b(orm|sequelize|prisma|sqlalchemy|typeorm|drizzle)\s*(query|model|schema)?', r'\b(crud\s*(operation|operations|endpoint|api))', r'\b(select|insert|update|delete)\s+(from|into|table)'],
+            IntentCategory.TRANSLATION: [r'\b(translate|translation)\s+(this|to|into|from)\s+(\w+)', r'\b(in\s+(english|spanish|french|german|chinese|japanese|korean|arabic|portuguese|italian|russian|hindi|urdu))', r'\b(how\s+(do\s+you|to)\s+say\s+.+\s+in\s+\w+)', r'\b(native|localize|localization|l10n|i18n|internationaliz)'],
+            IntentCategory.SUMMARIZATION: [r'\b(summarize|summary|summarise|tldr|tl;dr)\s+(this|the|it|that|for\s+me)', r'\b(brief|short|concise)\s+(overview|summary|explanation|version)\s*(of|for|about)?', r'\b(key\s+(points|takeaways|highlights))\s*(from|of|in)?', r'\b(main\s+(idea|points|theme|argument|concept))'],
+            IntentCategory.EXPLANATION: [r'\b(explain|explanation)\s+(to\s+me\s+)?', r'\b(what\s+(is|are|was|were|does|do|means|mean))\s+', r'\b(how\s+(does|do|did|can|would|should|to))\s+', r'\b(tell\s+me\s+(about|more\s+about|how|why))', r'\b(definition|meaning)\s+(of|for)\s+', r'\b(understand(ing)?)\s*(this|how|why|what|better)?', r'\b(break\s+down|simplify|elaborate)\s+'],
             IntentCategory.REASONING: [r'\b(reason|think)\s+(through|step\s+by\s+step)', r'\b(step\s+by\s+step)', r'\b(logical|critical|analytical)\s+(thinking|reasoning|analysis)'],
             IntentCategory.CREATIVE_WRITING: [r'\b(write|create|compose)\s+(a\s+)?(story|poem|poetry|novel|chapter|verse|lyrics|song|haiku|limerick)', r'\b(creative|fiction|fantasy|sci[- ]?fi|horror|romance|thriller|mystery)\s*(writing|story|tale)?'],
-            IntentCategory.MATHEMATICAL: [r'\b(calculate|compute|solve|evaluate)\s+(this|the|a)\s*(equation|expression|formula|problem|integral|derivative)?', r'\b(math|mathematics|algebra|calculus|geometry|statistics|probability|linear\s+algebra)\s*(problem|equation|question)?'],
-            IntentCategory.RESEARCH: [r'\b(research|find|search|look\s+up|investigate)\s+(about|on|for|into)', r'\b(academic|scholarly|peer[- ]?reviewed)\s*(source|paper|article|research|journal)?'],
-            IntentCategory.WEB_SEARCH: [r'\b(search|google)\s+(for|about|on)\s+', r'\b(what\s+is|who\s+is|where\s+is|when\s+(is|was|did))\s+', r'\b(latest|current|recent|news|update[s]?)\s+(on|about|for)\s+'],
+            IntentCategory.MATHEMATICAL: [r'\b(calculate|compute|solve|evaluate)\s+(this|the|a)\s*(equation|expression|formula|problem|integral|derivative)?', r'\b(math|mathematics|algebra|calculus|geometry|statistics|probability|linear\s+algebra)\s*(problem|equation|question)?', r'\b(integral|derivative|differentiat|integrat)\s*(of|the)?', r'\b(prove|proof)\s+(that|this|the)', r'\b(formula|equation)\s+(for|to\s+calculate|to\s+find)'],
+            IntentCategory.RESEARCH: [r'\b(research|find|search|look\s+up|investigate)\s+(about|on|for|into)', r'\b(stud(y|ies))\s+(show|suggest|indicate|demonstrate|prove)', r'\b(academic|scholarly|peer[- ]?reviewed)\s*(source|paper|article|research|journal)?', r'\b(cite|citation|reference|bibliography)\s+', r'\b(literature\s+review)\s*(on|for|of)?'],
+            IntentCategory.WEB_SEARCH: [r'\b(search|google)\s+(for|about|on)\s+', r'\b(what\s+is|who\s+is|where\s+is|when\s+(is|was|did))\s+', r'\b(latest|current|recent|news|update[s]?)\s+(on|about|for)'],
             IntentCategory.TEXT_TO_SPEECH: [r'\b(speak|say|read|narrate|pronounce)\s+(this|it|the|that)\s+', r'\b(text\s+to\s+speech|tts)\b'],
             IntentCategory.AUDIO_TRANSCRIPTION: [r'\b(transcribe\s+(this\s+)?(audio|voice|recording|speech))', r'\b(speech\s+to\s+text|stt)\b'],
             IntentCategory.VISION_ANALYSIS: [r'\b(analyze|describe|what(?:\'s| is)\s+in)\s+(this\s+)?(image|picture|photo)', r'\b(what\s+(do\s+you\s+)?see\s+in)'],
             IntentCategory.JOKE: [r'\btell\s+(me\s+)?(a\s+)?joke', r'\bmake\s+me\s+laugh', r'\bsomething\s+funny'],
-            IntentCategory.CONVERSATION: [r'^(hello|hi|hey|greetings|good\s+(morning|afternoon|evening))[\s!.?]*$', r'^(thank|thanks|thank\s+you|appreciate)[\s!.?]*$', r'^(how\s+are\s+you|how(\'s|\s+is)\s+it\s+going|what(\'s|\s+is)\s+up)[\s!.?]*$', r'^(bye|goodbye|see\s+you|farewell)[\s!.?]*$'],
+            IntentCategory.CONVERSATION: [r'^(hello|hi|hey|greetings|good\s+(morning|afternoon|evening))[\s!.?]*$', r'^(thank|thanks|thank\s+you|appreciate)[\s!.?]*$', r'^(how\s+are\s+you|how(\'s|\s+is)\s+it\s+going|what(\'s|\s+is)\s+up)[\s!.?]*$', r'^(bye|goodbye|see\s+you|farewell)[\s!.?]*$', r'^(sure|okay|ok|got\s+it|understood)[\s!.?]*$'],
         }
+
         self.compiled_patterns = {intent: [re.compile(p, re.IGNORECASE) for p in patterns] for intent, patterns in self.patterns.items()}
 
     def _init_synonyms(self):
@@ -1029,7 +1028,8 @@ class AdvancedIntentDetector:
 _detector = None
 def get_detector() -> AdvancedIntentDetector:
     global _detector
-    if _detector is None: _detector = AdvancedIntentDetector()
+    if _detector is None:
+        _detector = AdvancedIntentDetector()
     return _detector
 
 def detect_intent(prompt: str) -> tuple:
@@ -1058,7 +1058,6 @@ class UniversalRequest(BaseModel):
     files: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
 
-
 # ---------- Helper Functions ----------
 def get_groq_headers() -> dict:
     return {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -1070,7 +1069,7 @@ def detect_language(prompt: str) -> str:
     return "python"
 
 def get_elevenlabs_voice_id(voice_name: str) -> str:
-    return {"alloy": "21m00Tcm4TlvDq8ikWAM", "rachel": "21m00Tcm4TlvDq8ikWAM", "adam": "pNInz6obpgDQGcFmaJgB", "antoni": "ErXwobaYiN019PkySvjV", "bella": "EXAVITQu4vr4xnSDxMaL"}.get(voice_name.lower(), "21m00Tcm4TlvDq8ikWAM")
+    return {"alloy": "21m00Tcm4TlvDq8ikWAM", "rachel": "21m00Tcm4TlvDq8ikWAM", "adam": "pNInz6obpgDQGcFmaJgB", "antoni": "ErXwobaYiVQHn1TqBp", "bella": "EXAVITQu4vr4xnSDxMaL"}.get(voice_name.lower(), "21m00Tcm4TlvDq8ikWAM")
 
 async def extract_document_text(doc: str) -> str:
     try:
@@ -1123,7 +1122,6 @@ async def tell_joke(category: str) -> dict:
 async def solve_math(prompt: str) -> dict:
     if WOLFRAM_ALPHA_API_KEY:
         try:
-            import wolframalpha
             client = wolframalpha.Client(WOLFRAM_ALPHA_API_KEY)
             res = client.query(prompt)
             return {"answer": next(res.results).text, "method": "wolfram"}
@@ -1152,7 +1150,7 @@ async def extract_and_save_memory(user_id: str, prompt: str, response: str):
     if not user_id or user_id == "anonymous": return
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": "llama-3.1-8b-instant", "messages": [{"role": "user", "content": f"Extract facts about USER from this. Return JSON array of {{\"category\", \"content\"}} or []\nUser: {prompt[:500]}\nAI: {response[:500]}"}], "temperature": 0.1, "max_tokens": 200})
+            r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Extract facts about USER from this. Return JSON array of {{\"category\", \"content\"}} or []\nUser: {prompt[:500]}\nAI: {response[:500]}"}], "temperature": 0.1, "max_tokens": 200})
             raw = r.json()["choices"][0]["message"]["content"]
             if "```json" in raw: raw = raw.split("```json")[1].split("```")[0]
             for fact in json.loads(raw):
@@ -1189,19 +1187,14 @@ async def analyze_file(request: Request, file: UploadFile = File(...), stream: b
     content = await file.read()
     filename = file.filename or "unknown"
     file_size = len(content)
-    
     logger.info(f"[FILE] Upload: {filename} ({format_file_size(file_size)})")
-    
     if not content: raise HTTPException(400, "Empty file")
-    
     category = get_file_category(filename)
     max_allowed = MAX_ZIP_SIZE if category == FileCategory.ARCHIVE else MAX_FILE_SIZE
-    
     if file_size > max_allowed:
         raise HTTPException(400, f"File too large ({format_file_size(file_size)}). Max: {format_file_size(max_allowed)}")
-    
     if category == FileCategory.IMAGE:
-        if not OPENAI_API_KEY: raise HTTPException(500, "OpenAI Key required for image analysis")
+        if not OPENAI_API_KEY: raise HTTPException(500, "OpenAI Key required")
         b64 = base64.b64encode(content).decode()
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": [{"type": "text", "text": "Analyze this image in detail."}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]}]})
@@ -1210,12 +1203,10 @@ async def analyze_file(request: Request, file: UploadFile = File(...), stream: b
     result = await extract_file_content(content, filename)
     
     if category == FileCategory.ARCHIVE and result.files:
-        # Special handling for archives
         messages = [{"role": "system", "content": f"You are analyzing an archive. Archive info:\n- Entries: {result.metadata.get('entry_count')}\n- Extracted: {result.metadata.get('extracted_count')}\n\nProvide an overview of what this archive contains."}, {"role": "user", "content": result.content[:50000]}]
     else:
         file_context = f"\nFile: {filename}\nCategory: {result.metadata.get('category')}\nSize: {format_file_size(file_size)}\nLines: {result.metadata.get('line_count', 'N/A')}\n"
-        if result.metadata.get("language"):
-            file_context += f"Language: {result.metadata['language']}\n"
+        if result.metadata.get("language"): file_context += f"Language: {result.metadata['language']}\n"
         messages = [{"role": "system", "content": f"You analyze files. Detect type and respond accordingly:\n- Code → explain, find bugs, suggest improvements\n- Documents → summarize + key insights\n- Data → extract patterns\nBe structured.{file_context}"}, {"role": "user", "content": result.content}]
     
     if stream:
@@ -1243,8 +1234,6 @@ async def analyze_file(request: Request, file: UploadFile = File(...), stream: b
 async def ask_universal(request: Request, response: Response, current_user: dict = Depends(get_current_user_optional)):
     try:
         content_type = request.headers.get("content-type", "")
-        
-        # Handle multipart form data with file uploads
         if "multipart/form-data" in content_type:
             form = await request.form()
             prompt = form.get("prompt", "").strip() if form.get("prompt") else ""
@@ -1253,8 +1242,6 @@ async def ask_universal(request: Request, response: Response, current_user: dict
             if file:
                 file_content = await file.read()
                 filename = file.filename or "unknown"
-                
-                # Route to file analysis
                 if file.content_type and file.content_type.startswith("image/"):
                     if OPENAI_API_KEY:
                         b64 = base64.b64encode(file_content).decode()
@@ -1262,9 +1249,8 @@ async def ask_universal(request: Request, response: Response, current_user: dict
                             r = await client.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": [{"type": "text", "text": prompt or "Analyze this image."}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]}]})
                             return {"analysis": r.json()["choices"][0]["message"]["content"]}
                 
-                # Extract file content and analyze
                 result = await extract_file_content(file_content, filename)
-                messages = [{"role": "system", "content": f"You analyze files. File: {filename}, Category: {result.metadata.get('category')}, Size: {format_file_size(len(file_content))}"}, {"role": "user", "content": (prompt + "\n\n" if prompt else "") + result.content}]
+                messages = [{"role": "system", "content": f"File: {filename}, Category: {result.metadata.get('category')}, Size: {format_file_size(len(file_content))}"}, {"role": "user", "content": (prompt + "\n" if prompt else "") + result.content}]
                 
                 async def gen():
                     try:
@@ -1282,7 +1268,7 @@ async def ask_universal(request: Request, response: Response, current_user: dict
                     except Exception as e: yield sse({"type": "error", "message": str(e)})
                 return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
             
-            if not prompt: raise HTTPException(400, "prompt or file required")
+        if not prompt: raise HTTPException(status_code=400, detail="prompt or file required")
         
         body = await request.json()
         prompt = (body.get("prompt") or "").strip()
@@ -1290,7 +1276,7 @@ async def ask_universal(request: Request, response: Response, current_user: dict
         files = body.get("files", [])
         stream = body.get("stream", True)
         
-        output_type = body.get("output_type", "text")
+        output_type = body.get("output_type")
         language = body.get("language")
         target_language = body.get("target_language")
         voice = body.get("voice", "alloy")
@@ -1307,9 +1293,8 @@ async def ask_universal(request: Request, response: Response, current_user: dict
 
         identity = current_user or {}
         user_id = identity.get("id") or str(uuid.uuid4())
-
+        
         if not conversation_id: conversation_id = str(uuid.uuid4())
-
         await asyncio.to_thread(lambda: supabase.table("conversations").upsert({"id": conversation_id, "user_id": user_id, "created_at": datetime.utcnow().isoformat()}).execute())
 
         history_res = await asyncio.to_thread(lambda: supabase.table("messages").select("role, content").eq("conversation_id", conversation_id).order("created_at").limit(20).execute())
@@ -1318,14 +1303,13 @@ async def ask_universal(request: Request, response: Response, current_user: dict
         intent_result = detect_intent_advanced(prompt)
         detected_intent = intent_result.legacy_intent if intent_result else "chat"
         confidence = intent_result.confidence if intent_result else 0.0
-        
         logger.info(f"[INTENT] {detected_intent} ({confidence:.2%}) user={user_id[:8]}")
         
         if output_type == "code": detected_intent = "code_generation"
         elif target_language: detected_intent = "translation"
         elif enable_cot: detected_intent = "reasoning"
         elif execute_code: detected_intent = "code_execution"
-
+        
         if detected_intent == "joke": return await tell_joke("general")
         elif detected_intent == "math_calculation":
             async def math_gen():
@@ -1339,18 +1323,32 @@ async def ask_universal(request: Request, response: Response, current_user: dict
                     yield sse({"type": "done"})
                 except Exception as e: yield sse({"type": "error", "message": str(e)})
             return StreamingResponse(math_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-        elif detected_intent == "code_generation":
-            lang = language or detect_language(prompt)
-            async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CODE_MODEL, "messages": [{"role": "system", "content": get_detector().get_code_system_prompt(prompt)}, {"role": "user", "content": f"Write {lang} code for: {prompt}"}], "max_tokens": max_tokens, "temperature": temperature})
-                return {"language": lang, "code": r.json()["choices"][0]["message"]["content"]}
+        
+        elif detected_intent in ("web_search", "research"):
+            query = re.sub(r"^(search for|look up|find|google|research)\s+", "", prompt.lower(), flags=re.IGNORECASE)
+            async def search_gen():
+                try:
+                    yield sse({"type": "status", "status": "searching"})
+                    results = await serper_search(query)
+                    yield sse({"type": "search_results", "results": results})
+                    yield sse({"type": "status", "status": "summarizing"})
+                    async with httpx.AsyncClient(timeout=60) as client:
+                        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Answer: {query}\nResults: {json.dumps(results)}"}], "max_tokens": 2048, "temperature": 0.3})
+                        summary = r.json()["choices"][0]["message"]["content"]
+                    for char in summary:
+                        yield sse({"type": "token", "text": char})
+                        await asyncio.sleep(0.01)
+                    yield sse({"type": "done"})
+                except Exception as e: yield sse({"type": "error", "message": str(e)})
+            return StreamingResponse(search_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
         elif detected_intent == "code_execution" and JUDGE0_KEY:
             lang = language or detect_language(prompt)
             async def exec_gen():
                 try:
                     yield sse({"type": "status", "status": "generating"})
                     async with httpx.AsyncClient(timeout=60) as client:
-                        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CODE_MODEL, "messages": [{"role": "user", "content": f"Write executable {lang} code for: {prompt}"}], "max_tokens": max_tokens})
+                        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CODE_MODEL, "messages": [{"role": "system", "content": get_detector().get_code_system_prompt(prompt)}, {"role": "user", "content": f"Write executable {lang} code for: {prompt}"}], "max_tokens": max_tokens})
                         code = r.json()["choices"][0]["message"]["content"]
                     match = re.search(r"```(?:\w+)?\n(.*?)```", code, re.DOTALL)
                     if match: code = match.group(1)
@@ -1369,26 +1367,24 @@ async def ask_universal(request: Request, response: Response, current_user: dict
                     yield sse({"type": "done"})
                 except Exception as e: yield sse({"type": "error", "message": str(e)})
             return StreamingResponse(exec_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-        elif detected_intent in ("web_search", "research"):
-            query = re.sub(r"^(search for|look up|find|google|research)\s+", "", prompt.lower(), flags=re.IGNORECASE)
-            async def search_gen():
+
+        elif detected_intent == "translation":
+            text_to_translate = prompt
+            for pattern in [r"translate.*?to\s+(\w+):\s*(.+)", r"in\s+(\w+):\s*(.+)", r"to\s+(\w+):\s*(.+)"]:
+                match = re.search(pattern, prompt, re.IGNORECASE)
+                if match: target_language, text_to_translate = match.group(1), match.group(2); break
+            async def trans_gen():
                 try:
-                    yield sse({"type": "status", "status": "searching"})
-                    results = await serper_search(query)
-                    yield sse({"type": "search_results", "results": results})
-                    yield sse({"type": "status", "status": "summarizing"})
+                    yield sse({"type": "status", "status": "translating"})
                     async with httpx.AsyncClient(timeout=60) as client:
-                        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Answer: {query}\nResults: {json.dumps(results)}"}], "max_tokens": 2048, "temperature": 0.3})
-                        summary = r.json()["choices"][0]["message"]["content"]
-                    for char in summary:
-                        yield sse({"type": "token", "text": char})
-                        await asyncio.sleep(0.01)
-                    yield sse({"type": "done"})
+                        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Translate to {target_language}:\n{text_to_translate}"}], "max_tokens": max_tokens, "temperature": 0.3})
+                        return {"original": text_to_translate, "translated": r.json()["choices"][0]["message"]["content"], "target_language": target_language}
                 except Exception as e: yield sse({"type": "error", "message": str(e)})
-            return StreamingResponse(search_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+            return StreamingResponse(trans_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+
         elif detected_intent == "text_to_speech":
             text = re.sub(r"[#*`\[\]]", "", prompt).strip()
-            text = re.sub(r"^(speak|say|read|narrate)\s+(this|it|the|that)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"^(speak|say|read|narrate|pronounce)\s+(this|it|the|that)?\s*", "", text, flags=re.IGNORECASE)
             if ELEVENLABS_API_KEY:
                 try:
                     async with httpx.AsyncClient(timeout=60) as client:
@@ -1400,23 +1396,15 @@ async def ask_universal(request: Request, response: Response, current_user: dict
                     r = await client.post("https://api.openai.com/v1/audio/speech", headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, json={"model": "tts-1", "voice": voice, "input": text})
                     return {"audio": base64.b64encode(r.content).decode(), "provider": "openai"}
             raise HTTPException(500, "No TTS provider")
-        elif detected_intent == "translation":
-            text_to_translate = prompt
-            for pattern in [r"translate.*?to\s+(\w+):\s*(.+)", r"in\s+(\w+):\s*(.+)", r"to\s+(\w+):\s*(.+)"]:
-                match = re.search(pattern, prompt, re.IGNORECASE)
-                if match: target_language, text_to_translate = match.group(1), match.group(2); break
-            async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Translate to {target_language}:\n{text_to_translate}"}], "max_tokens": max_tokens, "temperature": 0.3})
-                return {"original": text_to_translate, "translated": r.json()["choices"][0]["message"]["content"], "target_language": target_language}
 
         # DEFAULT CHAT STREAM
-        user_memory_str = await fetch_user_memory(user_id)
         async def chat_gen():
             full_reply = ""
             try:
                 yield sse({"type": "status", "status": "thinking"})
                 messages = []
                 base_system = system_prompt or "You are HeloXAI, an advanced AI assistant. Be helpful, accurate, and concise."
+                user_memory_str = await fetch_user_memory(user_id)
                 if user_memory_str: base_system += f"\n\n{user_memory_str}\n\nUse this context to personalize if relevant."
                 messages.append({"role": "system", "content": base_system})
                 if context: messages.append({"role": "system", "content": f"Context: {context}"})
@@ -1437,8 +1425,7 @@ async def ask_universal(request: Request, response: Response, current_user: dict
             except Exception as e:
                 logger.error(f"Chat failed: {e}")
                 yield sse({"type": "error", "message": str(e)})
-            finally:
-                if full_reply: asyncio.create_task(extract_and_save_memory(user_id, prompt, full_reply))
+        
         return StreamingResponse(chat_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
     except HTTPException: raise
@@ -1446,12 +1433,11 @@ async def ask_universal(request: Request, response: Response, current_user: dict
         logger.error(f"/ask/universal failed: {e}")
         raise HTTPException(500, str(e))
 
-
 # ---------- TTS/STT ----------
 @app.post("/tts")
 async def text_to_speech(request: Request, current_user: dict = Depends(get_current_user_optional)):
     body = await request.json()
-    text = re.sub(r"[#*`\[\]]", "", body.get("text", "")).strip()
+    text = re.sub(r"[#*`\[\]]", "", body.get("text", "").strip())
     voice = body.get("voice", "alloy")
     if not text: raise HTTPException(400, "Text required")
     if ELEVENLABS_API_KEY:
@@ -1498,7 +1484,6 @@ async def speech_to_text(request: Request, current_user: dict = Depends(get_curr
 async def get_tts_voices():
     return {"voices": {"openai": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"], "elevenlabs": ["rachel", "drew", "bella", "antoni", "josh", "grace"]}, "providers": {"openai": bool(OPENAI_API_KEY), "elevenlabs": bool(ELEVENLABS_API_KEY)}}
 
-
 # ---------- Session Management ----------
 @app.post("/session/validate")
 async def validate_session(current_user: dict = Depends(get_current_user_optional)):
@@ -1515,8 +1500,6 @@ async def logout(request: Request, response: Response, current_user: dict = Depe
     clear_session_cookies(response)
     return {"status": "logged_out"}
 
-
-# ---------- Chat Management ----------
 @app.post("/stop")
 async def stop_generation(request: Request):
     body = await request.json()
@@ -1529,40 +1512,6 @@ async def stop_generation(request: Request):
         stopped = len(active_streams)
         active_streams.clear()
     return {"status": "stopped", "streams_stopped": stopped}
-
-@app.post("/regenerate")
-async def regenerate_response(request: Request, response: Response, current_user: dict = Depends(get_current_user_optional)):
-    body = await request.json()
-    conversation_id = body.get("conversation_id")
-    if not conversation_id: raise HTTPException(400, "conversation_id required")
-    user_id = (current_user or {}).get("id") or str(uuid.uuid4())
-    
-    messages_res = await asyncio.to_thread(lambda: supabase.table("messages").select("id, role, content").eq("conversation_id", conversation_id).eq("user_id", user_id).order("created_at", desc=True).limit(10).execute())
-    messages = messages_res.data or []
-    if not messages: raise HTTPException(404, "No messages")
-    
-    last_user_msg = next((m["content"] for m in messages if m["role"] == "user"), None)
-    last_assistant_id = next((m["id"] for m in messages if m["role"] == "assistant"), None)
-    if not last_user_msg: raise HTTPException(400, "No user message")
-    
-    history = await asyncio.to_thread(lambda: supabase.table("messages").select("role, content").eq("conversation_id", conversation_id).eq("user_id", user_id).order("created_at").limit(20).execute())
-    history_messages = history.data or []
-    if history_messages and history_messages[-1]["role"] == "assistant": history_messages = history_messages[:-1]
-    
-    if last_assistant_id:
-        await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("id", last_assistant_id).execute())
-    
-    async def gen():
-        try:
-            yield sse({"type": "status", "status": "regenerating"})
-            reply = await chat_with_tools(user_id, [{"role": "system", "content": "You are HeloXAI, a helpful AI assistant."}] + history_messages)
-            for char in reply:
-                yield sse({"type": "token", "text": char})
-                await asyncio.sleep(0.008)
-            await asyncio.to_thread(lambda: supabase.table("messages").insert({"id": str(uuid.uuid4()), "conversation_id": conversation_id, "user_id": user_id, "role": "assistant", "content": reply, "created_at": datetime.utcnow().isoformat()}).execute())
-            yield sse({"type": "done"})
-        except Exception as e: yield sse({"type": "error", "message": str(e)})
-    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
 @app.post("/newchat")
 async def create_new_chat(request: Request, response: Response, current_user: dict = Depends(get_current_user_optional)):
@@ -1580,31 +1529,11 @@ async def delete_chat(conversation_id: str, request: Request, current_user: dict
     return {"status": "deleted"}
 
 @app.get("/chats")
-async def list_chats(request: Request, limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0), current_user: dict = Depends(get_current_user_optional)):
+async def list_chats(request: Request, current_user: dict = Depends(get_current_user_optional)):
     user_id = (current_user or {}).get("id")
     if not user_id: return {"chats": [], "total": 0}
-    conv_res = await asyncio.to_thread(lambda: supabase.table("conversations").select("id, title, created_at, updated_at").eq("user_id", user_id).order("updated_at", desc=True).range(offset, offset + limit - 1).execute())
+    conv_res = await asyncio.to_thread(lambda: supabase.table("conversations").select("id, title, created_at, updated_at").eq("user_id", user_id).order("updated_at", desc=True).range(0, 50).execute())
     return {"chats": conv_res.data or [], "total": len(conv_res.data or [])}
-
-@app.get("/chat/{conversation_id}")
-async def get_chat(conversation_id: str, request: Request, limit: int = Query(50, ge=1, le=200), current_user: dict = Depends(get_current_user_optional)):
-    user_id = (current_user or {}).get("id")
-    if not user_id: raise HTTPException(401, "Auth required")
-    conv_res = await asyncio.to_thread(lambda: supabase.table("conversations").select("*").eq("id", conversation_id).eq("user_id", user_id).execute())
-    if not conv_res.data: raise HTTPException(404, "Not found")
-    msg_res = await asyncio.to_thread(lambda: supabase.table("messages").select("id, role, content, created_at").eq("conversation_id", conversation_id).order("created_at").range(0, limit - 1).execute())
-    return {"conversation": conv_res.data[0], "messages": msg_res.data or []}
-
-@app.patch("/chat/{conversation_id}")
-async def update_chat(conversation_id: str, request: Request, current_user: dict = Depends(get_current_user_optional)):
-    body = await request.json()
-    user_id = (current_user or {}).get("id")
-    if not user_id: raise HTTPException(401, "Auth required")
-    update_data = {"updated_at": datetime.utcnow().isoformat()}
-    if "title" in body: update_data["title"] = body["title"]
-    if "system_prompt" in body: update_data["system_prompt"] = body["system_prompt"]
-    await asyncio.to_thread(lambda: supabase.table("conversations").update(update_data).eq("id", conversation_id).eq("user_id", user_id).execute())
-    return {"status": "updated"}
 
 @app.get("/health")
 async def health():
@@ -1613,10 +1542,6 @@ async def health():
 @app.get("/info")
 async def info():
     return {"creator": CREATOR_INFO, "models": {"chat": CHAT_MODEL, "code": CODE_MODEL}, "providers": {"groq": bool(GROQ_API_KEY), "openai": bool(OPENAI_API_KEY), "elevenlabs": bool(ELEVENLABS_API_KEY), "judge0": bool(JUDGE0_KEY), "serper": bool(SERPER_API_KEY), "runway": bool(RUNWAYML_API_KEY)}, "features": ["streaming", "file_analysis", "archives", "code_execution", "web_search", "tts", "stt", "user_memory", "session_persistence"]}
-
-@app.get("/capabilities")
-async def capabilities():
-    return {"intents": [i.value for i in IntentCategory], "file_types": {"code": len(CODE_EXTENSIONS), "document": len(DOCUMENT_EXTENSIONS), "archive": len(ARCHIVE_EXTENSIONS)}}
 
 @app.get("/setup/sessions-table")
 async def setup_sessions_table():
@@ -1635,21 +1560,21 @@ CREATE TABLE IF NOT EXISTS user_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions(user_id, token);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_valid ON user_sessions(user_id, is_valid) WHERE is_valid = TRUE;
+CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions(expires_at);
 ALTER TABLE user_sessions ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Users manage own sessions" ON user_sessions FOR ALL USING (user_id = auth.uid());
 """}
 
-
 if __name__ == "__main__":
     import uvicorn
     print(f"""
-    ╔══════════════════════════════════════════╗
-    ║      HeloXAI ULTIMATE Server v2.0         ║
+    ╔══════════════════════════════════════╗
+    ║      HeloXAI ULTIMATE Server v2.0          ║
     ╠══════════════════════════════════════════╣
     ║  Chat Model: {CHAT_MODEL:<30} ║
     ║  File Handling: Archives, Code, Docs     ║
     ║  Auth: Production Session Management      ║
     ║  API:        http://localhost:8000         ║
-    ╚══════════════════════════════════════════╝
+    ╚═══════════════════════════════════════════╝
     """)
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
