@@ -2,29 +2,19 @@ version: "3.8"
 
 services:
   heloxai:
-    image: heloxai: "Your Docker Image Name/Tag"
+    build: .
     container_name: heloxai_backend
     ports:
-      - "8000:8000" # Host:Container Port (Host: 8000)
+      - "8000:8000" # Maps host port 8000 to container port 8000
     restart: always
+    env_file:
+      - .env # Loads variables from the .env file
     environment:
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_KEY=${SUPABASE_KEY}
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN}
-      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
-      - SERPER_API_KEY=${SERPER_API_KEY}
-      - WOLFRAM_ALPHA_API_KEY=${WOLFRAM_ALPHA_API_KEY}
-      - RUNWAYML_API_KEY=${RUNWAYML_API_KEY}
-      - JUDGE0_API_KEY=${JUDGE0_API_KEY}
-
-    # GPU Configuration (RunPod Specific)
-    deploy_mode: gpu
-    # deploy_mode: gpu-community (cheaper)
-
-# Healthcheck
-healthcheck:
-  test: ["curl", "-f", "http://localhost:8000/health"]
-  interval: 30s
-  retries: 3
+      - CUDA_VISIBLE_DEVICES=0 # Ensure it sees the GPU if using RunPod/NVIDIA
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
