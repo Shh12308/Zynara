@@ -28,4 +28,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/shh12308/heloxai:latest
+          tags: ghcr.io/shh12308/heloxai:v1
