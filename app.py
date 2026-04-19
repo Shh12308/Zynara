@@ -1,144 +1,105 @@
 import os
-import io
-import json
 import re
-import time
+import json
+import base64
 import uuid
 import asyncio
 import logging
 import hashlib
-import base64
-import tempfile
 import zipfile
-import shutil
+import tempfile
 import mimetypes
-import secrets
-from datetime import datetime, timezone, timedelta
+import shutil
+from io import BytesIO
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union, Tuple
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-# External Libraries
-import httpx
-from fastapi import FastAPI, Request, Header, UploadFile, File, HTTPException, Query, Form, Depends, Cookie, Response
-from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse, FileResponse
+from fastapi import FastAPI, Request, Response, HTTPException, Depends, UploadFile, File, Cookie, Header
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from supabase import create_client
+from pydantic import BaseModel, validator
+from fastapi.responses import PlainTextResponse
+import time
 
-# Document processing
-import fitz  # PyMuPDF2
-import docx
-import wolframalpha  # Added for math
+import httpx
+from supabase import create_client, create_async_client
 
-# ---------- ENV KEYS ----------
+# =========================
+# CONFIG & LOGGING
+# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("HeloXAi")
+
+# Environment Variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY") # Corrected variable name consistency
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("SUPABASE_URL or SUPABASE_KEY is missing")
-    
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# MODELS
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip() if os.getenv("GROQ_API_KEY") else ""
-STABILITY_API_KEY = os.getenv("STABILITY_API_KEY")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")  # CRITICAL: Used for backend Admin access
+GROQ_API_KEY = os.getenv("GROQ_API_KEY").strip() if os.getenv("GROQ_API_KEY") else None
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-SERPER_API_KEY = os.getenv("SERPER_API_KEY")
-RUNWAYML_API_KEY = os.getenv("RUNWAYML_API_KEY")
-WOLFRAM_ALPHA_API_KEY = os.getenv("WOLFRAM_ALPHA_API_KEY") # Fixed typo in logic
-IMAGE_MODEL_FREE_URL = os.getenv("IMAGE_MODEL_FREE_URL")
-USE_FREE_IMAGE_PROVIDER = os.getenv("USE_FREE_IMAGE_PROVIDER", "false").lower() in ("1", "true", "yes")
+LOGO_URL = os.getenv("LOGO_URL", "https://heloxai.xyz/logo.png")
 
-# ---------- FILE HANDLING CONFIG ----------
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
-MAX_ZIP_SIZE = 200 * 1024 * 1024  # 200MB for zips
-MAX_ZIP_ENTRIES = 1000
-MAX_EXTRACTED_SIZE = 500 * 1024 * 1024  # 500MB total extracted
-MAX_TEXT_LENGTH = 1000000  # 1M characters
-CHUNK_SIZE = 1024 * 1024  # 1MB chunks
+# =========================
+# UPGRADED MODEL CONFIGS
+# =========================
+# Using Llama 3.1 405B on Groq for advanced reasoning and coding
+# This replaces Llama 3.3 70B for a "bigger" version.
+DEFAULT_LLM_MODEL = "llama-3.1-405b-reasoning"
+CODE_MODEL = "llama-3.1-405b-reasoning" 
 
-# ---------- AUTH CONFIG ----------
-SESSION_DURATION = 365 * 24 * 60 * 60  # 1 year
-REFRESH_THRESHOLD = 7 * 24 * 60 * 60  # 7 days
-SESSION_CACHE_TTL = 300  # 5 minutes
+# File handling config
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_ZIP_SIZE = 100 * 1024 * 1024  # 100MB for zips
+MAX_ZIP_ENTRIES = 500
+MAX_EXTRACTED_SIZE = 200 * 1024 * 1024  # 200MB total extracted
+MAX_TEXT_LENGTH = 380000  
+CHUNK_SIZE = 1024 * 1024  # 1MB chunks for large files
 
-# ---------- CONFIG & LOGGING ----------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger("heloxai-server")
+# Auth config
+SESSION_DURATION = 365 * 24 * 60 * 60  # 1 year in seconds
+REFRESH_THRESHOLD = 7 * 24 * 60 * 60  # Refresh session if less than 7 days remaining
 
-app = FastAPI(title="HeloXAI Ultimate Server", redirect_slashes=False)
+if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set for this backend.")
 
-# FIX: Corrected middleware argument
+app = FastAPI(
+    title="HeloxAi API",
+    description="Advanced AI Assistant Backend (RunPod Ready)",
+    version="2.1.0"
+)
+
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Fixed typo 'allow_origins'
+    allow_origins=["https://heloxai.xyz", "*"], # Allow * for RunPod serverless testing usually, but restrict for prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
-# ---------------- SSE HELPER ----------------
-def sse(obj: dict) -> str:
-    return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
+# Database Clients
+# IMPORTANT: We use the SERVICE_KEY here because we are doing custom auth (cookies).
+# The ANON_KEY relies on Supabase Auth (JWTs), which we aren't using for user identification.
+supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# ---------------- MODELS ----------------
-CHAT_MODEL = os.getenv("CHAT_MODEL", "llama-3.1-8b-instant") # Defaulting to fast model for chat
-CODE_MODEL = os.getenv("CODE_MODEL", "llama-3.1-70b-versatile") # Using larger model for code
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+# Global State for Stream Cancellation
+active_streams: Dict[str, asyncio.Task] = {}
 
-# ---------- Creator info ----------
-CREATOR_INFO = {
-    "name": "GoldYLocks",
-    "age": 17,
-    "country": "England",
-    "projects": ["MZ", "LS", "SX", "CB"],
-    "socials": {"discord": "@nexisphere123_89431", "twitter": "@NexiSphere"},
-}
-
-JUDGE0_LANGUAGES = {
-    "c": 50, "cpp": 54, "java": 62, "python": 71, "javascript": 63,
-    "typescript": 74, "go": 60, "rust": 73, "csharp": 51, "php": 68,
-    "ruby": 72, "swift": 83, "kotlin": 78, "bash": 46, "sql": 82,
-}
-JUDGE0_URL = "https://judge0-ce.p.rapidapi.com"
-JUDGE0_KEY = os.getenv("JUDGE0_API_KEY")
-
-if not JUDGE0_KEY:
-    logger.warning("Code execution disabled (missing Judge0 API key)")
-
-# ---------- HTTP Client ----------
-groq_client = httpx.AsyncClient(timeout=None, limits=httpx.Limits(max_connections=100, max_keepalive_connections=20))
-
-# ---------- Active Streams ----------
-active_streams: Dict[str, asyncio.Event] = {}
-active_stream_lock = asyncio.Lock()
-
-# ---------- Session Cache ----------
+# Session cache for performance
 _session_cache: Dict[str, Dict[str, Any]] = {}
+_session_cache_ttl = 300  # 5 minutes
 _session_cache_last_cleanup = time.time()
 
-async def register_stream(stream_id: str) -> asyncio.Event:
-    async with active_stream_lock:
-        event = asyncio.Event()
-        active_streams[stream_id] = event
-        return event
-
-async def unregister_stream(stream_id: str):
-    async with active_stream_lock:
-        active_streams.pop(stream_id, None)
-
-async def stop_stream(stream_id: str):
-    async with active_stream_lock:
-        event = active_streams.get(stream_id)
-        if event:
-            event.set()
-
-
 # =========================
-# FILE TYPE SYSTEM
+# FILE TYPE DEFINITIONS
 # =========================
 class FileCategory(Enum):
     CODE = "code"
@@ -152,16 +113,52 @@ class FileCategory(Enum):
     BINARY = "binary"
     UNKNOWN = "unknown"
 
+# Comprehensive file type mappings
 CODE_EXTENSIONS = {
-    '.py', '.pyw', '.pyx', '.pyi', '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts',
-    '.html', '.htm', '.css', '.scss', '.sass', '.less', '.vue', '.svelte', '.astro',
-    '.java', '.kt', '.kts', '.scala', '.groovy', '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx',
-    '.cs', '.go', '.rs', '.php', '.phtml', '.rb', '.erb', '.swift', '.dart',
+    # Python
+    '.py', '.pyw', '.pyx', '.pyd', '.pyi', '.py3',
+    # JavaScript/TypeScript
+    '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts',
+    # Web
+    '.html', '.htm', '.css', '.scss', '.sass', '.less', '.styl',
+    '.vue', '.svelte', '.astro',
+    # Java/JVM
+    '.java', '.kt', '.kts', '.scala', '.groovy', '.gradle',
+    '.clj', '.cljs', '.hs',
+    # C/C++
+    '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.hxx', '.inl',
+    # C#
+    '.cs', '.csx',
+    # Go
+    '.go',
+    # Rust
+    '.rs',
+    # PHP
+    '.php', '.phtml',
+    # Ruby
+    '.rb', '.erb', '.rake', '.gemspec',
+    # Swift
+    '.swift',
+    # Dart/Flutter
+    '.dart',
+    # Shell
     '.sh', '.bash', '.zsh', '.fish', '.ps1', '.psm1', '.bat', '.cmd',
-    '.lua', '.pl', '.pm', '.r', '.sql', '.graphql', '.gql', '.tf', '.hcl',
-    '.sol', '.move', '.cairo', '.toml', '.dockerfile', '.makefile',
-    '.json', '.yaml', '.yml', '.xml', '.ini', '.cfg', '.conf', '.env',
-    '.md', '.rst', '.tex', '.latex', '.proto',
+    # Lua
+    '.lua',
+    # Perl
+    '.pl', '.pm',
+    # R
+    '.r', '.R',
+    # SQL
+    '.sql', '.mysql', '.pgsql', '.sqlite',
+    # Config/Data formats
+    '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
+    '.env', '.properties', '.xml',
+    # Markup
+    '.md', '.rst', '.asciidoc', '.adoc', '.tex', '.latex',
+    # Other
+    '.dockerfile', '.makefile', '.cmake', '.proto', '.graphql', '.gql',
+    '.tf', '.hcl', '.sol', '.move', '.cairo',
 }
 
 DOCUMENT_EXTENSIONS = {
@@ -191,13 +188,24 @@ VIDEO_EXTENSIONS = {
 }
 
 ARCHIVE_EXTENSIONS = {
-    '.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z', '.rar', '.zst', '.lz4',
+    '.zip', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.7z',
+    '.rar', '.zst', '.lz4',
 }
 
+CONFIG_EXTENSIONS = {
+    '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
+    '.env', '.properties', '.xml', '.editorconfig', '.eslintrc',
+    '.prettierrc', '.gitignore', '.dockerignore', '.npmrc',
+}
+
+
 def get_file_category(filename: str) -> FileCategory:
+    """Determine file category from extension"""
     if not filename:
         return FileCategory.UNKNOWN
+    
     ext = Path(filename).suffix.lower()
+    
     if ext in CODE_EXTENSIONS:
         return FileCategory.CODE
     elif ext in DOCUMENT_EXTENSIONS:
@@ -212,42 +220,82 @@ def get_file_category(filename: str) -> FileCategory:
         return FileCategory.VIDEO
     elif ext in ARCHIVE_EXTENSIONS:
         return FileCategory.ARCHIVE
+    elif ext in CONFIG_EXTENSIONS:
+        return FileCategory.CONFIG
     else:
         return FileCategory.UNKNOWN
 
+
 def get_file_language(filename: str) -> Optional[str]:
+    """Get programming language from file extension for syntax highlighting"""
     ext_lang_map = {
-        '.py': 'python', '.js': 'javascript', '.jsx': 'javascript', '.ts': 'typescript',
-        '.tsx': 'typescript', '.html': 'html', '.css': 'css', '.scss': 'scss',
-        '.vue': 'vue', '.svelte': 'svelte', '.java': 'java', '.kt': 'kotlin',
-        '.scala': 'scala', '.c': 'c', '.cpp': 'cpp', '.cs': 'csharp',
-        '.go': 'go', '.rs': 'rust', '.php': 'php', '.rb': 'ruby',
-        '.swift': 'swift', '.dart': 'dart', '.sh': 'bash', '.sql': 'sql',
-        '.json': 'json', '.yaml': 'yaml', '.yml': 'yaml', '.xml': 'xml',
-        '.md': 'markdown', '.rust': 'rust', '.lua': 'lua', '.r': 'r',
-        '.graphql': 'graphql', '.tf': 'hcl', '.hcl': 'hcl', '.toml': 'toml',
+        '.py': 'python', '.pyw': 'python', '.pyx': 'python',
+        '.js': 'javascript', '.jsx': 'javascript', '.mjs': 'javascript',
+        '.ts': 'typescript', '.tsx': 'typescript',
+        '.html': 'html', '.htm': 'html',
+        '.css': 'css', '.scss': 'scss', '.less': 'less',
+        '.vue': 'vue', '.svelte': 'svelte',
+        '.java': 'java', '.kt': 'kotlin', '.scala': 'scala',
+        '.c': 'c', '.h': 'c', '.cpp': 'cpp', '.hpp': 'cpp', '.cc': 'cpp',
+        '.cs': 'csharp',
+        '.go': 'go',
+        '.rs': 'rust',
+        '.php': 'php',
+        '.rb': 'ruby',
+        '.swift': 'swift',
+        '.dart': 'dart',
+        '.sh': 'bash', '.bash': 'bash', '.zsh': 'bash',
+        '.ps1': 'powershell', '.bat': 'batch',
+        '.lua': 'lua',
+        '.pl': 'perl',
+        '.r': 'r', '.R': 'r',
+        '.sql': 'sql',
+        '.json': 'json', '.xml': 'xml',
+        '.yaml': 'yaml', '.yml': 'yaml',
+        '.toml': 'toml',
+        '.md': 'markdown', '.rst': 'rst',
+        '.tex': 'latex',
+        '.dockerfile': 'dockerfile',
+        '.graphql': 'graphql', '.gql': 'graphql',
+        '.tf': 'hcl', '.hcl': 'hcl',
+        '.sol': 'solidity',
     }
     ext = Path(filename).suffix.lower()
     return ext_lang_map.get(ext)
 
+
 def is_binary_file(filename: str, content: bytes = None) -> bool:
+    """Check if file is binary based on extension or content"""
     ext = Path(filename).suffix.lower()
-    binary_exts = IMAGE_EXTENSIONS | AUDIO_EXTENSIONS | VIDEO_EXTENSIONS | ARCHIVE_EXTENSIONS | {
-        '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.pyc', '.pyo',
-        '.class', '.o', '.obj', '.a', '.lib', '.pdf', '.doc', '.docx',
-        '.xls', '.xlsx', '.ppt', '.pptx', '.sqlite', '.db', '.sqlite3',
-        '.png', '.jpg', '.jpeg', '.gif', '.webp', '.mp3', '.mp4',
-        '.woff', '.woff2', '.ttf', '.otf', '.eot', '.pak', '.bundle',
+    
+    # Known binary extensions
+    binary_exts = IMAGE_EXTENSIONS | AUDIO_EXTENSIONS | VIDEO_EXTENSIONS | {
+        '.exe', '.dll', '.so', '.dylib', '.bin', '.dat',
+        '.pyc', '.pyo', '.class', '.o', '.obj', '.a', '.lib',
+        '.zip', '.tar', '.gz', '.7z', '.rar',
+        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+        '.sqlite', '.db', '.sqlite3',
+        '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico',
+        '.mp3', '.mp4', '.wav', '.avi', '.mov', '.mkv',
+        '.woff', '.woff2', '.ttf', '.otf', '.eot',
+        '.pak', '.bundle',
     }
+    
     if ext in binary_exts:
         return True
+    
+    # Check content for null bytes (indicates binary)
     if content and len(content) > 0:
+        # Check first 8192 bytes for null bytes
         check_bytes = content[:8192]
         if b'\x00' in check_bytes:
             return True
+    
     return False
 
+
 def format_file_size(size_bytes: int) -> str:
+    """Format file size in human-readable format"""
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size_bytes < 1024.0:
             return f"{size_bytes:.1f} {unit}"
@@ -256,7 +304,7 @@ def format_file_size(size_bytes: int) -> str:
 
 
 # =========================
-# FILE EXTRACTION SYSTEM
+# ADVANCED FILE EXTRACTOR
 # =========================
 class FileExtractionResult:
     def __init__(
@@ -282,28 +330,16 @@ class FileExtractionResult:
             "original_size": self.original_size
         }
 
-def extract_text_with_fallback(content: bytes, max_length: int) -> Tuple[str, bool]:
-    encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1', 'ascii']
-    for encoding in encodings:
-        try:
-            text = content.decode(encoding, errors='strict' if encoding != 'latin-1' else 'ignore')
-            truncated = len(text) > max_length
-            if truncated:
-                text = text[:max_length] + "\n\n[... Content truncated ...]"
-            return text, truncated
-        except (UnicodeDecodeError, LookupError):
-            continue
-    text = content.decode('utf-8', errors='replace')
-    truncated = len(text) > max_length
-    if truncated:
-        text = text[:max_length] + "\n\n[... Content truncated ...]"
-    return text, truncated
 
 async def extract_file_content(
     content: bytes,
     filename: str,
     max_length: int = MAX_TEXT_LENGTH
 ) -> FileExtractionResult:
+    """
+    Extract text content from any file type.
+    Handles code files, documents, archives, and more.
+    """
     original_size = len(content)
     category = get_file_category(filename)
     metadata = {
@@ -315,33 +351,61 @@ async def extract_file_content(
     }
 
     try:
+        # Handle archives (zip files)
         if category == FileCategory.ARCHIVE:
             return await extract_archive_content(content, filename, max_length, metadata)
 
+        # Handle images
         if category == FileCategory.IMAGE:
             return FileExtractionResult(
-                content=f"[Image file: {filename} ({format_file_size(original_size)}) - Use image analysis for visual content]",
+                content=f"[Image file: {filename} ({format_file_size(original_size)}) - Use image analysis endpoint for visual content]",
                 metadata=metadata,
                 original_size=original_size
             )
 
+        # Handle audio/video
         if category in (FileCategory.AUDIO, FileCategory.VIDEO):
             return FileExtractionResult(
-                content=f"[{category.value.capitalize()} file: {filename} ({format_file_size(original_size)}) - Media file]",
+                content=f"[{category.value.capitalize()} file: {filename} ({format_file_size(original_size)}) - Media file cannot be extracted as text]",
                 metadata=metadata,
                 original_size=original_size
             )
 
+        # Handle PDF
         if filename.lower().endswith('.pdf'):
             return await extract_pdf_content(content, filename, max_length, metadata)
 
+        # Handle code and text files
+        if category in (FileCategory.CODE, FileCategory.CONFIG, FileCategory.UNKNOWN):
+            text, truncated = extract_text_with_fallback(content, max_length)
+            metadata["line_count"] = text.count('\n') + 1
+            return FileExtractionResult(
+                content=text,
+                metadata=metadata,
+                truncated=truncated,
+                original_size=original_size
+            )
+
+        # Handle documents and data files
+        if category in (FileCategory.DOCUMENT, FileCategory.DATA):
+            text, truncated = extract_text_with_fallback(content, max_length)
+            metadata["line_count"] = text.count('\n') + 1
+            return FileExtractionResult(
+                content=text,
+                metadata=metadata,
+                truncated=truncated,
+                original_size=original_size
+            )
+
+        # Handle binary files
         if is_binary_file(filename, content):
             return FileExtractionResult(
-                content=f"[Binary file: {filename} ({format_file_size(original_size)}) - Cannot extract text]",
+                content=f"[Binary file: {filename} ({format_file_size(original_size)}) - Cannot extract text content]",
                 metadata=metadata,
                 original_size=original_size
             )
 
+        # Fallback: try to decode as text
         text, truncated = extract_text_with_fallback(content, max_length)
         metadata["line_count"] = text.count('\n') + 1
         return FileExtractionResult(
@@ -359,70 +423,132 @@ async def extract_file_content(
             original_size=original_size
         )
 
-async def extract_pdf_content(content: bytes, filename: str, max_length: int, metadata: Dict) -> FileExtractionResult:
+
+def extract_text_with_fallback(content: bytes, max_length: int) -> Tuple[str, bool]:
+    """Extract text with multiple encoding fallbacks"""
+    encodings = ['utf-8', 'utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1', 'ascii']
+    
+    for encoding in encodings:
+        try:
+            text = content.decode(encoding, errors='strict' if encoding != 'latin-1' else 'ignore')
+            truncated = len(text) > max_length
+            if truncated:
+                text = text[:max_length] + "\n\n[... Content truncated ...]"
+            return text, truncated
+        except (UnicodeDecodeError, LookupError):
+            continue
+    
+    # Final fallback: decode with error replacement
+    text = content.decode('utf-8', errors='replace')
+    truncated = len(text) > max_length
+    if truncated:
+        text = text[:max_length] + "\n\n[... Content truncated ...]"
+    return text, truncated
+
+
+async def extract_pdf_content(
+    content: bytes,
+    filename: str,
+    max_length: int,
+    metadata: Dict[str, Any]
+) -> FileExtractionResult:
+    """Extract text from PDF files"""
     try:
-        doc_pdf = fitz.open(stream=content, filetype="pdf")
+        from PyPDF2 import PdfReader
+        reader = PdfReader(BytesIO(content))
         pages = []
-        for i, page in enumerate(doc_pdf):
-            page_text = page.get_text() or ""
+        
+        for i, page in enumerate(reader.pages):
+            page_text = page.extract_text() or ""
             pages.append(f"--- Page {i + 1} ---\n{page_text}")
+        
         full_text = "\n\n".join(pages)
-        metadata["page_count"] = len(doc_pdf)
+        metadata["page_count"] = len(reader.pages)
+        
         truncated = len(full_text) > max_length
         if truncated:
             full_text = full_text[:max_length] + "\n\n[... Content truncated ...]"
+        
         return FileExtractionResult(
             content=full_text,
             metadata=metadata,
             truncated=truncated,
             original_size=len(content)
         )
-    except Exception as e:
+    except ImportError:
+        logger.warning("PyPDF2 not installed, returning placeholder for PDF")
         return FileExtractionResult(
-            content=f"[PDF parsing error: {str(e)}]",
-            metadata={**metadata, "error": str(e)},
-            original_size=len(content)
-        )
-
-async def extract_archive_content(content: bytes, filename: str, max_length: int, metadata: Dict) -> FileExtractionResult:
-    ext = Path(filename).suffix.lower()
-    if ext == '.zip':
-        return await extract_zip_content(content, filename, max_length, metadata)
-    elif ext in ('.tar', '.gz', '.tgz', '.bz2', '.xz'):
-        return await extract_tar_content(content, filename, max_length, metadata)
-    else:
-        return FileExtractionResult(
-            content=f"[Archive format {ext} not supported for extraction]",
+            content=f"[PDF file: {filename} ({format_file_size(len(content))}) - PDF parsing not available on server]",
             metadata=metadata,
             original_size=len(content)
         )
 
-async def extract_zip_content(content: bytes, filename: str, max_length: int, metadata: Dict) -> FileExtractionResult:
+
+async def extract_archive_content(
+    content: bytes,
+    filename: str,
+    max_length: int,
+    metadata: Dict[str, Any]
+) -> FileExtractionResult:
+    """Extract and read contents from archive files (zip, tar, etc.)"""
+    ext = Path(filename).suffix.lower()
+    
+    if ext == '.zip':
+        return await extract_zip_content(content, filename, max_length, metadata)
+    elif ext in ('.tar', '.gz', '.tgz', '.bz2', '.xz'):
+        return await extract_tar_content(content, filename, max_length, metadata)
+    elif ext in ('.7z', '.rar'):
+        return FileExtractionResult(
+            content=f"[{ext.upper()} archive: {filename} ({format_file_size(len(content))}) - This archive format requires additional server setup]",
+            metadata=metadata,
+            original_size=len(content)
+        )
+    else:
+        return FileExtractionResult(
+            content=f"[Archive: {filename} ({format_file_size(len(content))}) - Unsupported archive format]",
+            metadata=metadata,
+            original_size=len(content)
+        )
+
+
+async def extract_zip_content(
+    content: bytes,
+    filename: str,
+    max_length: int,
+    metadata: Dict[str, Any]
+) -> FileExtractionResult:
+    """Extract and read text contents from ZIP files"""
     extracted_files = []
     all_text_parts = []
     total_extracted = 0
     entry_count = 0
+    
     try:
-        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        with zipfile.ZipFile(BytesIO(content)) as zf:
+            # Check for zip bombs
             if len(zf.namelist()) > MAX_ZIP_ENTRIES:
                 return FileExtractionResult(
-                    content=f"[ZIP: {filename} - Too many entries ({len(zf.namelist())})]",
+                    content=f"[ZIP archive: {filename} - Too many entries ({len(zf.namelist())}). Maximum allowed: {MAX_ZIP_ENTRIES}]",
                     metadata=metadata,
                     original_size=len(content)
                 )
             
+            # Sort by name for consistent output
             entries = sorted(zf.namelist())
             
             for entry_name in entries:
+                # Skip directories and hidden files
                 if entry_name.endswith('/') or '/__MACOSX/' in entry_name:
                     continue
                 if entry_name.startswith('__MACOSX') or entry_name.startswith('.'):
                     continue
                 
                 entry_count += 1
+                
                 try:
                     entry_info = zf.getinfo(entry_name)
                     
+                    # Skip if single file is too large
                     if entry_info.file_size > MAX_FILE_SIZE:
                         extracted_files.append({
                             "name": entry_name,
@@ -433,6 +559,7 @@ async def extract_zip_content(content: bytes, filename: str, max_length: int, me
                         })
                         continue
                     
+                    # Check total extracted size
                     if total_extracted + entry_info.file_size > MAX_EXTRACTED_SIZE:
                         extracted_files.append({
                             "name": entry_name,
@@ -443,32 +570,37 @@ async def extract_zip_content(content: bytes, filename: str, max_length: int, me
                         })
                         continue
                     
+                    # Read entry content
                     entry_content = zf.read(entry_name)
                     total_extracted += len(entry_content)
                     
                     entry_category = get_file_category(entry_name)
                     entry_language = get_file_language(entry_name)
                     
+                    # Extract text from entry
                     if entry_category in (FileCategory.IMAGE, FileCategory.AUDIO, FileCategory.VIDEO):
-                        extracted_files.append({
+                        file_info = {
                             "name": entry_name,
                             "size": len(entry_content),
                             "size_formatted": format_file_size(len(entry_content)),
                             "category": entry_category.value,
                             "status": "media",
-                        })
+                            "note": f"{entry_category.value} file - visual/audio content"
+                        }
                     elif is_binary_file(entry_name, entry_content):
-                        extracted_files.append({
+                        file_info = {
                             "name": entry_name,
                             "size": len(entry_content),
                             "size_formatted": format_file_size(len(entry_content)),
                             "category": "binary",
                             "status": "binary",
-                        })
+                            "note": "Binary file - cannot extract text"
+                        }
                     else:
                         text, _ = extract_text_with_fallback(entry_content, max_length)
+                        
                         if text.strip():
-                            extracted_files.append({
+                            file_info = {
                                 "name": entry_name,
                                 "size": len(entry_content),
                                 "size_formatted": format_file_size(len(entry_content)),
@@ -477,18 +609,19 @@ async def extract_zip_content(content: bytes, filename: str, max_length: int, me
                                 "status": "extracted",
                                 "line_count": text.count('\n') + 1,
                                 "preview": text[:500] + ("..." if len(text) > 500 else "")
-                            })
+                            }
                             all_text_parts.append(f"\n{'='*60}\nFile: {entry_name}\n{'='*60}\n{text}")
                         else:
-                            extracted_files.append({
+                            file_info = {
                                 "name": entry_name,
                                 "size": len(entry_content),
                                 "size_formatted": format_file_size(len(entry_content)),
                                 "category": entry_category.value,
                                 "status": "empty",
-                            })
+                                "note": "File is empty"
+                            }
                     
-                    extracted_files[-1]["name"] = entry_name
+                    extracted_files.append(file_info)
                     
                 except Exception as e:
                     extracted_files.append({
@@ -497,16 +630,20 @@ async def extract_zip_content(content: bytes, filename: str, max_length: int, me
                         "error": str(e)
                     })
         
+        # Combine all extracted text
         full_text = f"ZIP Archive: {filename}\n"
         full_text += f"Total entries: {len(zf.namelist())}, Processed: {entry_count}\n"
         full_text += f"Extracted text files: {len(all_text_parts)}\n"
         full_text += f"Total extracted size: {format_file_size(total_extracted)}\n\n"
         
         if all_text_parts:
-            full_text += "="*60 + "\nEXTRACTED CONTENT\n" + "="*60
+            full_text += "=".join(["="*30]) + "\n"
+            full_text += "EXTRACTED CONTENT\n"
+            full_text += "=".join(["="*30])
             full_text += "".join(all_text_parts)
         else:
-            full_text += "No text content could be extracted.\n\nFiles found:\n"
+            full_text += "No text content could be extracted from this archive.\n\n"
+            full_text += "Files found:\n"
             for f in extracted_files:
                 status = f.get('status', 'unknown')
                 full_text += f"  - {f['name']} ({f.get('size_formatted', '?')}) [{status}]\n"
@@ -534,35 +671,46 @@ async def extract_zip_content(content: bytes, filename: str, max_length: int, me
         
     except zipfile.BadZipFile:
         return FileExtractionResult(
-            content=f"[Error: {filename} is not a valid ZIP file]",
+            content=f"[Error: {filename} is not a valid ZIP file or is corrupted]",
             metadata=metadata,
             original_size=len(content)
         )
     except Exception as e:
+        logger.error(f"ZIP extraction error: {e}")
         return FileExtractionResult(
             content=f"[Error extracting ZIP {filename}: {str(e)}]",
             metadata={**metadata, "error": str(e)},
             original_size=len(content)
         )
 
-async def extract_tar_content(content: bytes, filename: str, max_length: int, metadata: Dict) -> FileExtractionResult:
+
+async def extract_tar_content(
+    content: bytes,
+    filename: str,
+    max_length: int,
+    metadata: Dict[str, Any]
+) -> FileExtractionResult:
+    """Extract and read text contents from TAR archives"""
     import tarfile
+    
     extracted_files = []
     all_text_parts = []
     
     try:
-        with tarfile.open(fileobj=io.BytesIO(content)) as tf:
+        with tarfile.open(fileobj=BytesIO(content)) as tf:
             members = [m for m in tf.getmembers() if m.isfile()]
+            
             if len(members) > MAX_ZIP_ENTRIES:
                 return FileExtractionResult(
-                    content=f"[TAR: {filename} - Too many entries ({len(members)})]",
+                    content=f"[TAR archive: {filename} - Too many entries ({len(members)})]",
                     metadata=metadata,
                     original_size=len(content)
                 )
             
             for member in members:
-                if member.name.startswith('./'):
+                if member.name.startswith('./') or member.name.startswith('/'):
                     member.name = member.name.lstrip('./')
+                
                 if member.name.startswith('__MACOSX') or member.name.startswith('.'):
                     continue
                 
@@ -570,6 +718,7 @@ async def extract_tar_content(content: bytes, filename: str, max_length: int, me
                     f = tf.extractfile(member)
                     if f is None:
                         continue
+                    
                     entry_content = f.read()
                     entry_category = get_file_category(member.name)
                     
@@ -590,6 +739,7 @@ async def extract_tar_content(content: bytes, filename: str, max_length: int, me
                             "status": "binary",
                             "category": entry_category.value
                         })
+                        
                 except Exception as e:
                     extracted_files.append({
                         "name": member.name,
@@ -597,7 +747,9 @@ async def extract_tar_content(content: bytes, filename: str, max_length: int, me
                         "error": str(e)
                     })
         
-        full_text = f"TAR Archive: {filename}\nEntries: {len(members)}, Extracted: {len(all_text_parts)}\n\n"
+        full_text = f"TAR Archive: {filename}\n"
+        full_text += f"Entries: {len(members)}, Extracted: {len(all_text_parts)}\n\n"
+        
         if all_text_parts:
             full_text += "".join(all_text_parts)
         
@@ -619,6 +771,7 @@ async def extract_tar_content(content: bytes, filename: str, max_length: int, me
             truncated=truncated,
             original_size=len(content)
         )
+        
     except Exception as e:
         return FileExtractionResult(
             content=f"[Error extracting TAR {filename}: {str(e)}]",
@@ -630,36 +783,67 @@ async def extract_tar_content(content: bytes, filename: str, max_length: int, me
 # =========================
 # PRODUCTION-GRADE AUTH SYSTEM
 # =========================
-PRIMARY_COOKIE = "HeloX_Session"
-FINGERPRINT_COOKIE = "HeloX_FP"
-BACKUP_COOKIE = "HeloX_ID"
-DEVICE_COOKIE = "HeloX_Dev"
-SESSION_TOKEN_COOKIE = "HeloX_Token"
-SESSION_EXPIRY_COOKIE = "HeloX_Expiry"
+PRIMARY_COOKIE = "HeloxAi_Session"
+FINGERPRINT_COOKIE = "HeloxAi_FP"
+BACKUP_COOKIE = "HeloxAi_ID"
+DEVICE_COOKIE = "HeloxAi_Dev"
+SESSION_TOKEN_COOKIE = "HeloxAi_Token"
+SESSION_EXPIRY_COOKIE = "HeloxAi_Expiry"
 
+# Cookie settings - production grade
 def get_cookie_settings(remember: bool = True) -> Dict:
+    """Get cookie settings based on remember preference"""
     if remember:
-        return {"max_age": SESSION_DURATION, "httponly": True, "secure": True, "samesite": "none", "path": "/"}
+        return {
+            "max_age": SESSION_DURATION,
+            "httponly": True,
+            "secure": True,
+            "samesite": "none",
+            "path": "/"
+        }
     else:
-        return {"max_age": 24 * 60 * 60, "httponly": True, "secure": True, "samesite": "none", "path": "/"}
+        return {
+            "max_age": 24 * 60 * 60,  # Session only (24 hours)
+            "httponly": True,
+            "secure": True,
+            "samesite": "none",
+            "path": "/"
+        }
+
 
 def generate_device_fingerprint(request: Request) -> str:
+    """Generate a stable device fingerprint from request headers"""
     fp_components = [
         request.headers.get("user-agent", ""),
         request.headers.get("accept-language", ""),
         request.headers.get("accept-encoding", ""),
-        request.headers.get("sec-ch-ua-platform", ""),
-        request.headers.get("sec-ch-ua-mobile", ""),
+        request.headers.get("sec-ch-ua-platform", ""),  # New API for platform
+        request.headers.get("sec-ch-ua-mobile", ""),    # Mobile detection
         request.client.host if request.client else "",
     ]
-    return hashlib.sha256("|".join(fp_components).encode()).hexdigest()[:32]
+    fp_string = "|".join(fp_components)
+    return hashlib.sha256(fp_string.encode()).hexdigest()[:32]
+
 
 def generate_session_token() -> str:
+    """Generate a secure session token"""
+    import secrets
     return secrets.token_urlsafe(64)
 
-def set_session_cookies(response: Response, user_id: str, fingerprint: str, session_token: str, remember: bool = True):
+
+def set_session_cookies(
+    response: Response,
+    user_id: str,
+    fingerprint: str,
+    session_token: str,
+    remember: bool = True
+):
+    """Set all session cookies for maximum persistence"""
     settings = get_cookie_settings(remember)
+    
+    # Calculate expiry timestamp
     expiry = int(time.time()) + (SESSION_DURATION if remember else 24 * 60 * 60)
+    
     response.set_cookie(key=PRIMARY_COOKIE, value=user_id, **settings)
     response.set_cookie(key=FINGERPRINT_COOKIE, value=fingerprint, **settings)
     response.set_cookie(key=BACKUP_COOKIE, value=user_id, **settings)
@@ -667,194 +851,213 @@ def set_session_cookies(response: Response, user_id: str, fingerprint: str, sess
     response.set_cookie(key=SESSION_TOKEN_COOKIE, value=session_token, **settings)
     response.set_cookie(key=SESSION_EXPIRY_COOKIE, value=str(expiry), **settings)
 
+
 def clear_session_cookies(response: Response):
-    for cookie_name in [PRIMARY_COOKIE, FINGERPRINT_COOKIE, BACKUP_COOKIE, DEVICE_COOKIE, SESSION_TOKEN_COOKIE, SESSION_EXPIRY_COOKIE]:
-        response.delete_cookie(key=cookie_name, path="/", secure=True, samesite="none")
+    """Clear all session cookies on logout"""
+    cookies_to_clear = [
+        PRIMARY_COOKIE, FINGERPRINT_COOKIE, BACKUP_COOKIE,
+        DEVICE_COOKIE, SESSION_TOKEN_COOKIE, SESSION_EXPIRY_COOKIE
+    ]
+    for cookie_name in cookies_to_clear:
+        response.delete_cookie(
+            key=cookie_name,
+            path="/",
+            secure=True,
+            samesite="none"
+        )
+
 
 def is_session_expired(expiry_str: str) -> bool:
+    """Check if session has expired"""
     try:
-        return time.time() > int(expiry_str)
-    except:
+        expiry = int(expiry_str)
+        return time.time() > expiry
+    except (ValueError, TypeError):
         return True
+
 
 def should_refresh_session(expiry_str: str) -> bool:
+    """Check if session should be refreshed"""
     try:
-        return (int(expiry_str) - time.time()) < REFRESH_THRESHOLD
-    except:
+        expiry = int(expiry_str)
+        remaining = expiry - time.time()
+        return remaining < REFRESH_THRESHOLD
+    except (ValueError, TypeError):
         return True
 
+
 async def validate_session_token(user_id: str, token: str) -> bool:
+    """Validate session token against stored value"""
     try:
+        # Check cache first
         if user_id in _session_cache:
-            if _session_cache[user_id].get("token") == token:
+            cached = _session_cache[user_id]
+            if cached.get("token") == token:
                 return True
         
-        result = await asyncio.to_thread(
-            lambda: supabase.table("user_sessions")
+        # Query database using Service Client
+        result = await _execute_supabase_with_retry(
+            supabase.table("user_sessions")
             .select("token, expires_at")
             .eq("user_id", user_id)
             .eq("is_valid", True)
             .order("created_at", desc=True)
-            .limit(1)
-            .execute()
+            .limit(1),
+            description="Validate Session Token"
         )
         
         if result.data and result.data[0]["token"] == token:
-            _session_cache[user_id] = {"token": token, "expires_at": result.data[0].get("expires_at")}
+            # Update cache
+            _session_cache[user_id] = {
+                "token": token,
+                "expires_at": result.data[0].get("expires_at")
+            }
             return True
+        
         return False
     except Exception as e:
         logger.error(f"Session validation error: {e}")
         return False
 
-async def create_user_session(user_id: str, fingerprint: str, remember: bool = True, user_agent: str = "", ip: str = "") -> str:
+
+async def create_user_session(
+    user_id: str,
+    fingerprint: str,
+    remember: bool = True
+) -> str:
+    """Create a new user session in database"""
     token = generate_session_token()
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=SESSION_DURATION if remember else 24 * 60 * 60)
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        seconds=SESSION_DURATION if remember else 24 * 60 * 60
+    )
     
     try:
-        await asyncio.to_thread(
-            lambda: supabase.table("user_sessions").insert({
+        # Create new session
+        await _execute_supabase_with_retry(
+            supabase.table("user_sessions").insert({
                 "id": str(uuid.uuid4()),
                 "user_id": user_id,
                 "token": token,
                 "fingerprint": fingerprint,
-                "user_agent": user_agent[:500] if user_agent else "",
-                "ip_address": ip[:45] if ip else "",
+                "user_agent": "",  # Would need to pass from request
+                "ip_address": "",  # Would need to pass from request
                 "expires_at": expires_at.isoformat(),
                 "is_valid": True,
                 "created_at": datetime.now(timezone.utc).isoformat()
-            }).execute()
+            }),
+            description="Create User Session"
         )
-        _session_cache[user_id] = {"token": token, "expires_at": expires_at.isoformat()}
+        
+        # Update cache
+        _session_cache[user_id] = {
+            "token": token,
+            "expires_at": expires_at.isoformat()
+        }
+        
+        return token
     except Exception as e:
         logger.error(f"Failed to create session: {e}")
-    
-    return token
+        # Return a fallback token (less secure but doesn't break flow)
+        return token
+
 
 async def cleanup_session_cache():
+    """Periodically clean up expired session cache entries"""
     global _session_cache_last_cleanup
     now = time.time()
-    if now - _session_cache_last_cleanup < SESSION_CACHE_TTL:
+    
+    if now - _session_cache_last_cleanup < _session_cache_ttl:
         return
+    
     _session_cache_last_cleanup = now
-    expired = [uid for uid, data in _session_cache.items() if is_session_expired(data.get("expires_at", "0"))]
-    for uid in expired:
-        del _session_cache[uid]
+    expired_keys = []
+    
+    for user_id, data in _session_cache.items():
+        expires_at = data.get("expires_at")
+        if expires_at:
+            try:
+                expiry_time = datetime.fromisoformat(expires_at).timestamp()
+                if now > expiry_time:
+                    expired_keys.append(user_id)
+            except:
+                expired_keys.append(user_id)
+    
+    for key in expired_keys:
+        del _session_cache[key]
 
-async def get_current_user_optional(
-    request: Request,
-    response: Response,
-    HeloX_Session: Optional[str] = Cookie(None),
-    HeloX_Token: Optional[str] = Cookie(None),
-    HeloX_Expiry: Optional[str] = Cookie(None),
-    HeloX_FP: Optional[str] = Cookie(None),
-    HeloX_ID: Optional[str] = Cookie(None),
-    HeloX_Dev: Optional[str] = Cookie(None),
-    authorization: Optional[str] = Header(None)
-) -> Dict[str, Any]:
-    await cleanup_session_cache()
-    
-    current_fingerprint = generate_device_fingerprint(request)
-    user_agent = request.headers.get("user-agent", "")
-    client_ip = request.client.host if request.client else ""
-    
-    # Check Bearer token first
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization[7:]
-        return {"id": token, "is_authenticated": True}
-    
-    user_id = None
-    session_valid = False
-    remember = True
-    
-    # Validate existing session
-    if HeloX_Session and HeloX_Token:
-        if is_session_expired(HeloX_Expiry or "0"):
-            clear_session_cookies(response)
-        else:
-            if await validate_session_token(HeloX_Session, HeloX_Token):
-                user_id = HeloX_Session
-                session_valid = True
-                remember = not is_session_expired(HeloX_Expiry or "0")
-    
-    # Fallback to backup cookie
-    if not user_id and HeloX_ID:
-        user_id = HeloX_ID
-    
-    # Fallback to device fingerprint lookup
-    if not user_id and HeloX_Dev:
-        fp_part = HeloX_Dev.split("_")[0] if "_" in HeloX_Dev else HeloX_Dev
-        try:
-            result = await asyncio.to_thread(
-                lambda: supabase.table("users").select("id").eq("fingerprint", fp_part).limit(1).execute()
-            )
-            if result.data:
-                user_id = result.data[0]["id"]
-        except:
-            pass
-    
-    # Fallback to stored fingerprint
-    if not user_id and HeloX_FP:
-        try:
-            result = await asyncio.to_thread(
-                lambda: supabase.table("users").select("id").eq("fingerprint", HeloX_FP).limit(1).execute()
-            )
-            if result.data:
-                user_id = result.data[0]["id"]
-        except:
-            pass
-    
-    # Load user data
-    if user_id:
-        try:
-            result = await asyncio.to_thread(
-                lambda: supabase.table("users").select("*").eq("id", user_id).limit(1).execute()
-            )
-            if result.data:
-                u = result.data[0]
-                if u.get("fingerprint") != current_fingerprint:
-                    try:
-                        await asyncio.to_thread(
-                            lambda: supabase.table("users").update({"fingerprint": current_fingerprint}).eq("id", user_id).execute()
-                        )
-                    except:
-                        pass
-                
-                if not session_valid:
-                    new_token = await create_user_session(user_id, current_fingerprint, remember, user_agent, client_ip)
-                    session_valid = True
-                
-                set_session_cookies(response, user_id, current_fingerprint, new_token or HeloX_Token, remember)
-                
-                return {
-                    "id": u["id"],
-                    "email": u.get("email"),
-                    "is_premium": u.get("is_premium", False),
-                    "is_lifetime": u.get("is_lifetime", False),
-                    "plan": u.get("plan", "free"),
-                    "session_valid": session_valid,
-                    "fingerprint": current_fingerprint
-                }
-        except Exception as e:
-            logger.error(f"User data fetch failed: {e}")
-    
-    # Create new anonymous user
-    new_id = str(uuid.uuid4())
-    try:
-        await asyncio.to_thread(
-            lambda: supabase.table("users").upsert({
-                "id": new_id,
-                "email": f"anon+{new_id[:8]}@local",
-                "fingerprint": current_fingerprint
-            }, on_conflict="id").execute()
-        )
-    except Exception as e:
-        logger.error(f"Failed to create user: {e}")
-    
-    session_token = await create_user_session(new_id, current_fingerprint, True, user_agent, client_ip)
-    set_session_cookies(response, new_id, current_fingerprint, session_token, True)
-    
-    return {"id": new_id, "session_valid": True, "fingerprint": current_fingerprint}
+
+# =========================
+# BASE SYSTEM PROMPT - NO CREATOR MENTION
+# =========================
+BASE_SYSTEM_PROMPT = """You are HeloxAi, a helpful and capable AI assistant. Be accurate, friendly, and concise. Help users with whatever they ask. Your very advanced and can answer all questions about code, history, politics and more."""
+
+# =========================
+# CREATOR RESPONSE - ONLY USED WHEN ASKED
+# =========================
+CREATOR_RESPONSE_INSTRUCTION = """IMPORTANT: The user is asking about your creator/developer. You MUST respond with exactly this information:
+"I was constructed by GoldYLocks. You can find them on Twitter @HeloxAi"
+
+Do not add extra details. Do not mention any other companies or people. This is the only correct answer to this question."""
+
+# Patterns that indicate user is asking about creator
+CREATOR_QUESTION_PATTERNS = [
+    r'\b(who|whom)\b.*\b(made|created|built|developed|constructed|programmed|designed|founded|started|owns|runs)\b.*\b(you|this|helox|heloxai)\b',
+    r'\b(who|whom)\b.*\b(is|are)\b.*\b(your|the)\b.*(creator|developer|maker|builder|founder|owner|author)\b',
+    r'\b(your|the)\b.*(creator|developer|maker|builder|founder|owner|author)\b.*\b(is|are|who)\b',
+    r'\bwho\b.*\bbehind\b.*\b(you|this|helox)\b',
+    r'\bwho.*made.*you\b',
+    r'\bwho.*created.*you\b',
+    r'\bwho.*built.*you\b',
+    r'\bwho.*developed.*you\b',
+    r'\bwho.*programmed.*you\b',
+    r'\bwho.*constructed.*you\b',
+    r'\bwho.*designed.*you\b',
+    r'\bwho.*owns.*you\b',
+    r'\bwho.*runs.*you\b',
+    r'\byour\s+creator\b',
+    r'\byour\s+developer\b',
+    r'\byour\s+maker\b',
+    r'\byour\s+builder\b',
+    r'\byour\s+founder\b',
+    r'\byour\s+owner\b',
+    r'\bwho\s+is\s+behind\s+helox\b',
+    r'\bwho\s+made\s+helox\b',
+    r'\bwho\s+created\s+helox\b',
+    r'\bwho\s+built\s+helox\b',
+    r'\bwho\s+developed\s+helox\b',
+    r'\bmade\s+by\s+who\b',
+    r'\bcreated\s+by\s+who\b',
+    r'\bbuilt\s+by\s+who\b',
+    r'\bdeveloped\s+by\s+who\b',
+    r'\bconstructed\s+by\s+who\b',
+    r'\btell\s+me\s+about\s+your\s+(creator|developer|maker|builder|founder)\b',
+    r'\bwhat\s+company\s+made\s+you\b',
+    r'\bwhat\s+team\s+made\s+you\b',
+    r'\bwhere\s+do\s+you\s+come\s+from\b',
+    r'\bhow\s+were\s+you\s+(made|created|built|developed|born)\b',
+    r'\bare\s+you\s+made\s+by\b',
+    r'\bdid\s+.*\s+make\s+you\b',
+    r'\bdid\s+.*\s+create\s+you\b',
+    r'\bdid\s+.*\s+build\s+you\b',
+]
+
+# Pre-compile creator patterns for performance
+COMPILED_CREATOR_PATTERNS = [re.compile(p, re.IGNORECASE) for p in CREATOR_QUESTION_PATTERNS]
+
+
+def is_creator_question(text: str) -> bool:
+    """Check if user is asking about who created/made the AI"""
+    for pattern in COMPILED_CREATOR_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
+
+
+def get_system_prompt(user_prompt: str) -> str:
+    """Return base prompt normally, creator response ONLY if asked"""
+    if is_creator_question(user_prompt):
+        return BASE_SYSTEM_PROMPT + "\n\n" + CREATOR_RESPONSE_INSTRUCTION
+    return BASE_SYSTEM_PROMPT
 
 
 # =========================
@@ -867,9 +1070,7 @@ class IntentCategory(Enum):
     CODE_GENERATION = "code_generation"
     CODE_REVIEW = "code_review"
     CODE_DEBUG = "code_debug"
-    CODE_EXECUTION = "code_execution"
     DOCUMENT_CREATION = "document_creation"
-    DOCUMENT_ANALYSIS = "document_analysis"
     DATA_ANALYSIS = "data_analysis"
     DATA_VISUALIZATION = "data_visualization"
     WEB_DEVELOPMENT = "web_development"
@@ -878,16 +1079,11 @@ class IntentCategory(Enum):
     TRANSLATION = "translation"
     SUMMARIZATION = "summarization"
     EXPLANATION = "explanation"
-    REASONING = "reasoning"
     CREATIVE_WRITING = "creative_writing"
     MATHEMATICAL = "mathematical"
     RESEARCH = "research"
-    WEB_SEARCH = "web_search"
-    TEXT_TO_SPEECH = "text_to_speech"
-    AUDIO_TRANSCRIPTION = "audio_transcription"
-    VISION_ANALYSIS = "vision_analysis"
-    JOKE = "joke"
     CONVERSATION = "conversation"
+
 
 @dataclass
 class IntentResult:
@@ -896,7 +1092,6 @@ class IntentResult:
     sub_intents: List[IntentCategory]
     keywords_matched: List[str]
     patterns_matched: List[str]
-    legacy_intent: str
 
     def to_dict(self) -> Dict:
         return {
@@ -904,106 +1099,340 @@ class IntentResult:
             "confidence": round(self.confidence, 3),
             "sub_intents": [i.value for i in self.sub_intents],
             "keywords_matched": self.keywords_matched,
-            "patterns_matched": self.patterns_matched,
-            "legacy_intent": self.legacy_intent
+            "patterns_matched": self.patterns_matched
         }
+
 
 class AdvancedIntentDetector:
     def __init__(self):
         self._compile_patterns()
         self._init_synonyms()
-        self.negation_words = {"don't", "dont", "do not", "doesn't", "doesnt", "does not", "didn't", "didnt", "did not", "never", "no", "not", "without", "skip", "avoid", "except", "but not", "ignore", "rather than"}
-        self.legacy_intent_map = {
-            IntentCategory.IMAGE_GENERATION: "image_generation", IntentCategory.VIDEO_GENERATION: "video_generation",
-            IntentCategory.AUDIO_GENERATION: "audio_generation", IntentCategory.CODE_GENERATION: "code_generation",
-            IntentCategory.CODE_REVIEW: "code_generation", IntentCategory.CODE_DEBUG: "code_generation",
-            IntentCategory.CODE_EXECUTION: "code_execution", IntentCategory.DOCUMENT_CREATION: "document_creation",
-            IntentCategory.DOCUMENT_ANALYSIS: "document_creation", IntentCategory.DATA_ANALYSIS: "data_analysis",
-            IntentCategory.DATA_VISUALIZATION: "data_analysis", IntentCategory.WEB_DEVELOPMENT: "code_generation",
-            IntentCategory.API_DEVELOPMENT: "code_generation", IntentCategory.DATABASE: "code_generation",
-            IntentCategory.TRANSLATION: "translation", IntentCategory.SUMMARIZATION: "summarization",
-            IntentCategory.EXPLANATION: "reasoning", IntentCategory.REASONING: "reasoning",
-            IntentCategory.CREATIVE_WRITING: "creative_writing", IntentCategory.MATHEMATICAL: "math_calculation",
-            IntentCategory.RESEARCH: "web_search", IntentCategory.WEB_SEARCH: "web_search",
-            IntentCategory.TEXT_TO_SPEECH: "text_to_speech", IntentCategory.AUDIO_TRANSCRIPTION: "audio_transcription",
-            IntentCategory.VISION_ANALYSIS: "vision_analysis", IntentCategory.JOKE: "joke", IntentCategory.CONVERSATION: "chat",
+        self.negation_words = {
+            "don't", "dont", "do not", "doesn't", "doesnt", "does not",
+            "didn't", "didnt", "did not", "never", "no", "not", "without",
+            "skip", "avoid", "except", "but not", "ignore", "rather than"
         }
 
     def _compile_patterns(self):
         self.patterns = {
-            IntentCategory.IMAGE_GENERATION: [r'\b(generate|create|make|draw|render|paint|sketch|illustrate)\s+(a\s+|an\s+)?(image|picture|photo|drawing|illustration|artwork|painting|sketch|graphic|visual)', r'\b(image|picture|photo|drawing|illustration)\s+(of|showing|depicting|with|for|about)', r'\b(text\s+to\s+image|txt2img|img2img)', r'\b(visualize|visualise)\s+(this|that|the|it)', r'\b(dall[eé]|midjourney|stable\s+diffusion|sd\s*xl|flux)', r'\b(generate|create)\s+(some\s+)?art', r'\bmake\s+(me\s+)?(a\s+)?(visual|graphic|thumbnail|logo|icon|banner|poster)'],
-            IntentCategory.VIDEO_GENERATION: [r'\b(generate|create|make|produce)\s+(a\s+)?(video|clip|movie|animation|motion\s+graphic)', r'\b(text\s+to\s+video|txt2vid|video\s+generation)', r'\b(animate|animation)\s+(this|that|the|image|picture)', r'\b(video|clip|movie)\s+(of|showing|about|with)', r'\b(runway|pika|sora|mov2mov|kling|gen-3)', r'\b(turn|convert)\s+(this|the|image)\s+(into|to)\s+(a\s+)?(video|animation)'],
-            IntentCategory.AUDIO_GENERATION: [r'\b(generate|create|make|produce)\s+(a\s+)?(audio|sound|music|speech|voice|song|track|beat)', r'\b(text\s+to\s+speech|tts|speech\s+to\s+text|stt)', r'\b(music|song|beat|melody)\s+(generation|creation|for|about)', r'\b(elevenlabs|suno|udio|bark)', r'\b(clone|replicate)\s+(a\s+)?voice'],
-            IntentCategory.CODE_GENERATION: [r'\b(write|create|generate|build|code|develop|implement)\s+(a\s+)?(\w+\s+)?(function|class|module|script|program|code|snippet|app|application|component)', r'\b(how\s+(to|can\s+i)\s+(write|create|implement|code|build))', r'\b(code\s+(for|that|this|to|which|example))', r'\b(convert\s+(this|to)\s+(code|python|javascript|java|c\+\+|rust|go|typescript))', r'\b(scaffold|boilerplate|template)\s+(for|a)', r'\b(wrapper|helper|utility)\s+(function|class|module)\s+(for|to)', r'\b(implement\s+(the|a|this)\s+(\w+\s+)?(pattern|algorithm|logic|feature))'],
-            IntentCategory.CODE_REVIEW: [r'\b(review|analyze|critique|evaluate|audit)\s+(this|my|the)\s+(code|function|class|script|implementation|pr)', r'\b(is\s+(this|there)\s+(code|anything)\s+(good|bad|wrong|improvable|clean))', r'\b(best\s+practices?\s+(for|in)\s+(this|my)\s+(code|implementation))', r'\b(refactor|improve|optimize|clean\s+up)\s+(this|my|the)\s+(code|function|class)'],
-            IntentCategory.CODE_DEBUG: [r'\b(fix|debug|solve|troubleshoot|resolve)\s+(this|my|the|a)\s+(bug|error|issue|problem)', r'\b(why\s+(is|does|are|do)\s+(this|my|the|it)\s+(not\s+working|failing|breaking|erroring|returning))', r'\b(error|exception|traceback|stack\s+trace|segfault)\s*[:\n]', r'\b(won\'t\s+work|doesn\'t\s+work|not\s+working|broken|failing)'],
-            IntentCategory.CODE_EXECUTION: [r'\b(run|execute)\s+(this|my|the)\s+(code|script|program)', r'\b(output|result)\s+(of|for)\s+(this|the)\s+(code|program)', r'\b(test\s+(this|my|the)\s+(code|function|program))'],
-            IntentCategory.DOCUMENT_CREATION: [r'\b(create|write|generate|draft|compose)\s+(a\s+)?(document|pdf|report|letter|email|memo|article|essay|paper|proposal|whitepaper)', r'\b(document|report|proposal|specification)\s+(for|about|on|regarding)', r'\b(format\s+(as|this\s+as|it\s+as)\s+(a\s+)?(pdf|document|report|letter|markdown))', r'\b(professional|formal|business)\s+(document|letter|email|report)'],
-            IntentCategory.DOCUMENT_ANALYSIS: [r'\b(analyze|analysis|analyse|read|parse|extract)\s+(this|the|my)\s+(document|pdf|file|doc|report)', r'\b(summarize\s+(this|the)\s+(document|pdf|file|report))'],
-            IntentCategory.DATA_ANALYSIS: [r'\b(analyze|analysis|analyse)\s+(this|the|my|some)\s+(data|dataset|csv|excel|spreadsheet|json)', r'\b(statistics?|statistical)\s+(analysis|test|summary|overview)', r'\b(insights?\s+(from|in|about|into))', r'\b(correlation|regression|distribution|trend)\s+(analysis|of|in)', r'\b(clean|preprocess|prepare|wrangle)\s+(this|the)\s+(data|dataset)'],
-            IntentCategory.DATA_VISUALIZATION: [r'\b(create|make|generate|plot|chart|graph|visualize)\s+(a\s+)?(chart|graph|plot|visualization|diagram|dashboard)', r'\b(bar\s+chart|line\s+graph|scatter\s+plot|pie\s+chart|histogram|heatmap|box\s+plot|violin\s+plot)', r'\b(visualize|visualise|plot|chart|graph)\s+(this|the|these|those|data)'],
-            IntentCategory.WEB_DEVELOPMENT: [r'\b(create|build|develop|make)\s+(a\s+)?(website|web\s*page|web\s*app|landing\s+page|web\s*site|portfolio)', r'\b(html|css|javascript|typescript|react|vue|angular|next\.js|nuxt|svelte|tailwind)\b', r'\b(frontend|front[- ]end|back[- ]end|full[- ]stack)\s*(development|for|with|app)?', r'\b(responsive|mobile[- ]friendly|mobile[- ]first)\s*(design|website|layout)?', r'\b(component|page|layout|template)\s+(for|in)\s+(react|vue|angular|next)'],
-            IntentCategory.API_DEVELOPMENT: [r'\b(create|build|develop|design|implement)\s+(a\s+)?(api|rest\s*api|graphql\s*api|endpoint|route)', r'\b(api\s*(endpoint|route|handler|controller|gateway))', r'\b(restful|rest|graphql|grpc|websocket)\s*(api|service|endpoint)?', r'\b(openapi|swagger|api\s*documentation)', r'\b(request|response|payload)\s+(format|structure|schema)'],
-            IntentCategory.DATABASE: [r'\b(create|write|design)\s+(a\s+)?(database|schema|table|query|sql|migration)', r'\b(sql|mysql|postgres|postgresql|mongodb|redis|dynamodb|sqlite)\s*(query|statement|command)?', r'\b(schema\s*(design|migration|definition|update))', r'\b(orm|sequelize|prisma|sqlalchemy|typeorm|drizzle)\s*(query|model|schema)?', r'\b(crud\s*(operation|operations|endpoint|api))', r'\b(select|insert|update|delete)\s+(from|into|table)'],
-            IntentCategory.TRANSLATION: [r'\b(translate|translation)\s+(this|to|into|from)\s+(\w+)', r'\b(in\s+(english|spanish|french|german|chinese|japanese|korean|arabic|portuguese|italian|russian|hindi|urdu))', r'\b(how\s+(do\s+you|to)\s+say\s+.+\s+in\s+\w+)', r'\b(native|localize|localization|l10n|i18n|internationaliz)'],
-            IntentCategory.SUMMARIZATION: [r'\b(summarize|summary|summarise|tldr|tl;dr)\s+(this|the|it|that|for\s+me)', r'\b(brief|short|concise)\s+(overview|summary|explanation|version)\s*(of|for|about)?', r'\b(key\s+(points|takeaways|highlights))\s*(from|of|in)?', r'\b(main\s+(idea|points|theme|argument|concept))'],
-            IntentCategory.EXPLANATION: [r'\b(explain|explanation)\s+(to\s+me\s+)?', r'\b(what\s+(is|are|was|were|does|do|means|mean))\s+', r'\b(how\s+(does|do|did|can|would|should|to))\s+', r'\b(tell\s+me\s+(about|more\s+about|how|why))', r'\b(definition|meaning)\s+(of|for)\s+', r'\b(understand(ing)?)\s*(this|how|why|what|better)?', r'\b(break\s+down|simplify|elaborate)\s+'],
-            IntentCategory.REASONING: [r'\b(reason|think)\s+(through|step\s+by\s+step)', r'\b(step\s+by\s+step)', r'\b(logical|critical|analytical)\s+(thinking|reasoning|analysis)'],
-            IntentCategory.CREATIVE_WRITING: [r'\b(write|create|compose)\s+(a\s+)?(story|poem|poetry|novel|chapter|verse|lyrics|song|haiku|limerick)', r'\b(creative|fiction|fantasy|sci[- ]?fi|horror|romance|thriller|mystery)\s*(writing|story|tale)?'],
-            IntentCategory.MATHEMATICAL: [r'\b(calculate|compute|solve|evaluate)\s+(this|the|a)\s*(equation|expression|formula|problem|integral|derivative)?', r'\b(math|mathematics|algebra|calculus|geometry|statistics|probability|linear\s+algebra)\s*(problem|equation|question)?', r'\b(integral|derivative|differentiat|integrat)\s*(of|the)?', r'\b(prove|proof)\s+(that|this|the)', r'\b(formula|equation)\s+(for|to\s+calculate|to\s+find)'],
-            IntentCategory.RESEARCH: [r'\b(research|find|search|look\s+up|investigate)\s+(about|on|for|into)', r'\b(stud(y|ies))\s+(show|suggest|indicate|demonstrate|prove)', r'\b(academic|scholarly|peer[- ]?reviewed)\s*(source|paper|article|research|journal)?', r'\b(cite|citation|reference|bibliography)\s+', r'\b(literature\s+review)\s*(on|for|of)?'],
-            IntentCategory.WEB_SEARCH: [r'\b(search|google)\s+(for|about|on)\s+', r'\b(what\s+is|who\s+is|where\s+is|when\s+(is|was|did))\s+', r'\b(latest|current|recent|news|update[s]?)\s+(on|about|for)'],
-            IntentCategory.TEXT_TO_SPEECH: [r'\b(speak|say|read|narrate|pronounce)\s+(this|it|the|that)\s+', r'\b(text\s+to\s+speech|tts)\b'],
-            IntentCategory.AUDIO_TRANSCRIPTION: [r'\b(transcribe\s+(this\s+)?(audio|voice|recording|speech))', r'\b(speech\s+to\s+text|stt)\b'],
-            IntentCategory.VISION_ANALYSIS: [r'\b(analyze|describe|what(?:\'s| is)\s+in)\s+(this\s+)?(image|picture|photo)', r'\b(what\s+(do\s+you\s+)?see\s+in)'],
-            IntentCategory.JOKE: [r'\btell\s+(me\s+)?(a\s+)?joke', r'\bmake\s+me\s+laugh', r'\bsomething\s+funny'],
-            IntentCategory.CONVERSATION: [r'^(hello|hi|hey|greetings|good\s+(morning|afternoon|evening))[\s!.?]*$', r'^(thank|thanks|thank\s+you|appreciate)[\s!.?]*$', r'^(how\s+are\s+you|how(\'s|\s+is)\s+it\s+going|what(\'s|\s+is)\s+up)[\s!.?]*$', r'^(bye|goodbye|see\s+you|farewell)[\s!.?]*$', r'^(sure|okay|ok|got\s+it|understood)[\s!.?]*$'],
+            IntentCategory.IMAGE_GENERATION: [
+                r'\b(generate|create|make|draw|render|paint|sketch|illustrate)\s+(a\s+|an\s+)?(image|picture|photo|drawing|illustration|artwork|painting|sketch|graphic|visual)',
+                r'\b(image|picture|photo|drawing|illustration)\s+(of|showing|depicting|with|for|about)',
+                r'\b(text\s+to\s+image|txt2img|img2img)',
+                r'\b(visualize|visualise)\s+(this|that|the|it)',
+                r'\b(dall[eé]|midjourney|stable\s+diffusion|sd\s*xl|flux)',
+                r'\b(generate|create)\s+(some\s+)?art',
+                r'\b(make\s+(me\s+)?(a\s+)?(visual|graphic|thumbnail|logo|icon|banner|poster))',
+                r'\b(prompt\s+(for|to))\s+(generate|create|make)',
+            ],
+            IntentCategory.VIDEO_GENERATION: [
+                r'\b(generate|create|make|produce)\s+(a\s+)?(video|clip|movie|animation|motion\s+graphic)',
+                r'\b(text\s+to\s+video|txt2vid|video\s+generation)',
+                r'\b(animate|animation)\s+(this|that|the|image|picture)',
+                r'\b(video|clip|movie)\s+(of|showing|about|with)',
+                r'\b(runway|pika|sora|mov2mov|kling)',
+                r'\b(turn|convert)\s+(this|the|image)\s+(into|to)\s+(a\s+)?(video|animation)',
+            ],
+            IntentCategory.AUDIO_GENERATION: [
+                r'\b(generate|create|make|produce)\s+(a\s+)?(audio|sound|music|speech|voice|song|track|beat)',
+                r'\b(text\s+to\s+speech|tts|speech\s+to\s+text|stt)',
+                r'\b(music|song|beat|melody)\s+(generation|creation|for|about)',
+                r'\b(elevenlabs|suno|udio|bark)',
+                r'\b(clone|replicate)\s+(a\s+)?voice',
+            ],
+            IntentCategory.CODE_GENERATION: [
+                r'\b(write|create|generate|build|code|develop|implement)\s+(a\s+)?(\w+\s+)?(function|class|module|script|program|code|snippet|app|application|component)',
+                r'\b(how\s+(to|can\s+i)\s+(write|create|implement|code|build))',
+                r'\b(code\s+(for|that|this|to|which|example))',
+                r'\b(convert\s+(this|to)\s+(code|python|javascript|java|c\+\+|rust|go|typescript))',
+                r'\b(scaffold|boilerplate|template)\s+(for|a)',
+                r'\b(wrapper|helper|utility)\s+(function|class|module)\s+(for|to)',
+                r'\b(implement\s+(the|a|this)\s+(\w+\s+)?(pattern|algorithm|logic|feature))',
+            ],
+            IntentCategory.CODE_REVIEW: [
+                r'\b(review|analyze|critique|evaluate|audit)\s+(this|my|the)\s+(code|function|class|script|implementation|pr)',
+                r'\b(is\s+(this|there)\s+(code|anything)\s+(good|bad|wrong|improvable|clean))',
+                r'\b(best\s+practices?\s+(for|in)\s+(this|my)\s+(code|implementation))',
+                r'\b(refactor|improve|optimize|clean\s+up)\s+(this|my|the)\s+(code|function|class)',
+                r'\b(code\s+quality|technical\s+debt|code\s+smell)',
+            ],
+            IntentCategory.CODE_DEBUG: [
+                r'\b(fix|debug|solve|troubleshoot|resolve)\s+(this|my|the|a)\s+(bug|error|issue|problem)',
+                r'\b(why\s+(is|does|are|do)\s+(this|my|the|it)\s+(not\s+working|failing|breaking|erroring|returning))',
+                r'\b(error|exception|traceback|stack\s+trace|segfault)\s*[:\n]',
+                r'\b(what(\'s|\s+is)\s+(wrong|the\s+problem)\s+(with|in))',
+                r'\b(won\'t\s+work|doesn\'t\s+work|not\s+working|broken|failing)',
+                r'\b(unexpected|wrong|incorrect)\s+(result|output|behavior|value)',
+                r'\b(help\s+(me\s+)?)?debug',
+            ],
+            IntentCategory.DOCUMENT_CREATION: [
+                r'\b(create|write|generate|draft|compose)\s+(a\s+)?(document|pdf|report|letter|email|memo|article|essay|paper|proposal|whitepaper)',
+                r'\b(document|report|proposal|specification)\s+(for|about|on|regarding)',
+                r'\b(format\s+(as|this\s+as|it\s+as)\s+(a\s+)?(pdf|document|report|letter|markdown))',
+                r'\b(professional|formal|business)\s+(document|letter|email|report)',
+            ],
+            IntentCategory.DATA_ANALYSIS: [
+                r'\b(analyze|analysis|analyse)\s+(this|the|my|some)\s+(data|dataset|csv|excel|spreadsheet|json)',
+                r'\b(statistics?|statistical)\s+(analysis|test|summary|overview)',
+                r'\b(insights?\s+(from|in|about|into))',
+                r'\b(correlation|regression|distribution|trend)\s+(analysis|of|in)',
+                r'\b(clean|preprocess|prepare|wrangle)\s+(this|the)\s+(data|dataset)',
+                r'\b(eda|exploratory\s+data\s+analysis)',
+            ],
+            IntentCategory.DATA_VISUALIZATION: [
+                r'\b(create|make|generate|plot|chart|graph|visualize)\s+(a\s+)?(chart|graph|plot|visualization|diagram|dashboard)',
+                r'\b(bar\s+chart|line\s+graph|scatter\s+plot|pie\s+chart|histogram|heatmap|box\s+plot|violin\s+plot)',
+                r'\b(visualize|visualise|plot|chart|graph)\s+(this|the|these|those|data)',
+                r'\b(matplotlib|seaborn|plotly|d3|chart\.js|ggplot|altair)',
+            ],
+            IntentCategory.WEB_DEVELOPMENT: [
+                r'\b(create|build|develop|make)\s+(a\s+)?(website|web\s*page|web\s*app|landing\s+page|web\s*site|portfolio)',
+                r'\b(html|css|javascript|typescript|react|vue|angular|next\.js|nuxt|svelte|tailwind)\b',
+                r'\b(frontend|front[- ]end|back[- ]end|full[- ]stack)\s*(development|for|with|app)?',
+                r'\b(responsive|mobile[- ]friendly|mobile[- ]first)\s*(design|website|layout)?',
+                r'\b(component|page|layout|template)\s+(for|in)\s+(react|vue|angular|next)',
+            ],
+            IntentCategory.API_DEVELOPMENT: [
+                r'\b(create|build|develop|design|implement)\s+(a\s+)?(api|rest\s*api|graphql\s*api|endpoint|route)',
+                r'\b(api\s*(endpoint|route|handler|controller|gateway))',
+                r'\b(restful|rest|graphql|grpc|websocket)\s*(api|service|endpoint)?',
+                r'\b(openapi|swagger|api\s*documentation)',
+                r'\b(request|response|payload)\s+(format|structure|schema)',
+            ],
+            IntentCategory.DATABASE: [
+                r'\b(create|write|design)\s+(a\s+)?(database|schema|table|query|sql|migration)',
+                r'\b(sql|mysql|postgres|postgresql|mongodb|redis|dynamodb|sqlite)\s*(query|statement|command)?',
+                r'\b(schema\s*(design|migration|definition|update))',
+                r'\b(orm|sequelize|prisma|sqlalchemy|typeorm|drizzle)\s*(query|model|schema)?',
+                r'\b(crud\s*(operation|operations|endpoint|api))',
+                r'\b(select|insert|update|delete)\s+(from|into|table)',
+            ],
+            IntentCategory.TRANSLATION: [
+                r'\b(translate|translation)\s+(this|to|into|from)\s+(\w+)',
+                r'\b(in|to|into)\s+(english|spanish|french|german|chinese|japanese|korean|arabic|portuguese|italian|russian|hindi|urdu)',
+                r'\b(how\s+(do\s+you|to)\s+say\s+.+\s+in\s+\w+)',
+                r'\b(native|localize|localization|l10n|i18n|internationaliz)',
+            ],
+            IntentCategory.SUMMARIZATION: [
+                r'\b(summarize|summary|summarise|tldr|tl;dr)\s+(this|the|it|that|for\s+me)',
+                r'\b(brief|short|concise)\s+(overview|summary|explanation|version)\s*(of|for|about)?',
+                r'\b(key\s+(points|takeaways|highlights))\s*(from|of|in)?',
+                r'\b(main\s+(idea|points|theme|argument|concept))',
+                r'\b(give\s+me\s+(the\s+)?(gist|bottom\s+line|essence))',
+            ],
+            IntentCategory.EXPLANATION: [
+                r'\b(explain|explanation)\s+(to\s+me\s+)?',
+                r'\b(what\s+(is|are|was|were|does|do|means|mean))\s+',
+                r'\b(how\s+(does|do|did|can|would|should|to))\s+',
+                r'\b(tell\s+me\s+(about|more\s+about|how|why))',
+                r'\b(why\s+(is|does|do|are|did|can|would))\s+',
+                r'\b(definition|meaning)\s+(of|for)\s+',
+                r'\b(understand(ing)?)\s*(this|how|why|what|better)?',
+                r'\b(break\s+down|simplify|elaborate)\s+',
+            ],
+            IntentCategory.CREATIVE_WRITING: [
+                r'\b(write|create|compose)\s+(a\s+)?(story|poem|poetry|novel|chapter|verse|lyrics|song|haiku|limerick)',
+                r'\b(creative|fiction|fantasy|sci[- ]?fi|horror|romance|thriller|mystery)\s*(writing|story|tale)?',
+                r'\b(narrative|plot|character|setting|dialogue)\s*(for|development|creation|arc)?',
+                r'\b(storytelling|story[- ]?telling)',
+                r'\b(write\s+(like|in\s+the\s+style\s+of))\s+',
+            ],
+            IntentCategory.MATHEMATICAL: [
+                r'\b(calculate|compute|solve|evaluate)\s+(this|the|a)\s*(equation|expression|formula|problem|integral|derivative)?',
+                r'\b(math|mathematics|algebra|calculus|geometry|statistics|probability|linear\s+algebra)\s*(problem|equation|question)?',
+                r'\b(\d+[\.\d]*\s*[\+\-\*\/\^%\=]\s*[\.\d]*)',
+                r'\b(integral|derivative|differentiat|integrat)\s*(of|the)?',
+                r'\b(prove|proof)\s+(that|this|the)',
+                r'\b(formula|equation)\s+(for|to\s+calculate|to\s+find)',
+            ],
+            IntentCategory.RESEARCH: [
+                r'\b(research|find|search|look\s+up|investigate)\s+(about|on|for|into)',
+                r'\b(stud(y|ies))\s+(show|suggest|indicate|demonstrate|prove)',
+                r'\b(academic|scholarly|peer[- ]?reviewed)\s*(source|paper|article|research|journal)?',
+                r'\b(cite|citation|reference|bibliography)\s+',
+                r'\b(literature\s+review)\s*(on|for|of)?',
+                r'\b(what\s+(does\s+)?(research|science|literature)\s+say)',
+            ],
+            IntentCategory.CONVERSATION: [
+                r'^(hello|hi|hey|greetings|good\s+(morning|afternoon|evening))[\s!.?]*$',
+                r'^(thank|thanks|thank\s+you|appreciate)[\s!.?]*$',
+                r'^(how\s+are\s+you|how(\'s|\s+is)\s+it\s+going|what(\'s|\s+is)\s+up)[\s!.?]*$',
+                r'^(bye|goodbye|see\s+you|farewell)[\s!.?]*$',
+                r'^(sure|okay|ok|got\s+it|understood)[\s!.?]*$',
+            ],
         }
 
-        self.compiled_patterns = {intent: [re.compile(p, re.IGNORECASE) for p in patterns] for intent, patterns in self.patterns.items()}
+        self.compiled_patterns = {
+            intent: [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
+            for intent, patterns in self.patterns.items()
+        }
 
     def _init_synonyms(self):
         self.synonyms = {
-            IntentCategory.IMAGE_GENERATION: ["image", "picture", "photo", "drawing", "illustration", "artwork", "painting", "sketch", "graphic", "visual", "render", "thumbnail", "logo", "icon", "banner", "poster", "dalle", "midjourney", "stable diffusion", "ai art"],
-            IntentCategory.VIDEO_GENERATION: ["video", "clip", "movie", "film", "animation", "motion", "gif", "runway", "pika", "sora"],
-            IntentCategory.AUDIO_GENERATION: ["audio", "sound", "music", "speech", "voice", "song", "track", "beat", "tts", "elevenlabs", "suno"],
-            IntentCategory.CODE_GENERATION: ["code", "script", "function", "class", "module", "program", "app", "application", "snippet", "algorithm"],
-            IntentCategory.CODE_DEBUG: ["bug", "error", "issue", "problem", "debug", "fix", "troubleshoot", "exception", "crash", "broken", "wrong"],
-            IntentCategory.MATHEMATICAL: ["calculate", "compute", "solve", "math", "equation", "formula", "integral", "derivative", "proof"],
-            IntentCategory.RESEARCH: ["research", "find", "search", "investigate", "study", "academic", "citation", "reference"],
+            IntentCategory.IMAGE_GENERATION: [
+                "image", "picture", "photo", "photograph", "drawing", "illustration",
+                "artwork", "painting", "sketch", "graphic", "visual", "render",
+                "thumbnail", "logo", "icon", "banner", "poster", "infographic",
+                "dalle", "midjourney", "stable diffusion", "ai art", "generated art",
+                "portrait", "landscape", "composition", "digital art"
+            ],
+            IntentCategory.VIDEO_GENERATION: [
+                "video", "clip", "movie", "film", "animation", "motion",
+                "gif", "moving image", "video clip", "short video", "reel",
+                "runway", "pika", "sora", "animated", "motion graphic"
+            ],
+            IntentCategory.AUDIO_GENERATION: [
+                "audio", "sound", "music", "speech", "voice", "song", "track",
+                "beat", "melody", "tune", "podcast", "narration", "voiceover",
+                "tts", "text to speech", "elevenlabs", "suno", "udio"
+            ],
+            IntentCategory.CODE_GENERATION: [
+                "code", "script", "function", "class", "module", "program",
+                "app", "application", "software", "snippet", "implementation",
+                "algorithm", "routine", "procedure", "macro", "plugin", "extension",
+                "library", "package", "utility", "helper"
+            ],
+            IntentCategory.CODE_REVIEW: [
+                "review", "refactor", "improve", "optimize", "clean up",
+                "best practice", "code quality", "code smell", "technical debt",
+                "maintainability", "readability"
+            ],
+            IntentCategory.CODE_DEBUG: [
+                "bug", "error", "issue", "problem", "debug", "fix", "troubleshoot",
+                "exception", "crash", "fault", "defect", "glitch", "broken",
+                "typo", "mistake", "wrong", "incorrect"
+            ],
+            IntentCategory.DOCUMENT_CREATION: [
+                "document", "pdf", "report", "letter", "email", "memo", "article",
+                "essay", "paper", "proposal", "whitepaper", "manual", "guide",
+                "handbook", "documentation", "specification", "brief"
+            ],
+            IntentCategory.DATA_ANALYSIS: [
+                "data", "dataset", "csv", "excel", "spreadsheet", "analytics",
+                "statistics", "insights", "metrics", "kpi", "analysis"
+            ],
+            IntentCategory.DATA_VISUALIZATION: [
+                "chart", "graph", "plot", "visualization", "diagram", "dashboard",
+                "histogram", "scatter", "heatmap", "bar chart", "line graph",
+                "pie chart", "infographic", "plotly", "matplotlib"
+            ],
+            IntentCategory.WEB_DEVELOPMENT: [
+                "website", "webpage", "web app", "landing page", "frontend",
+                "backend", "fullstack", "full stack", "html", "css", "react",
+                "vue", "angular", "next.js", "svelte", "tailwind"
+            ],
+            IntentCategory.API_DEVELOPMENT: [
+                "api", "rest api", "graphql", "endpoint", "route", "restful",
+                "swagger", "openapi", "microservice"
+            ],
+            IntentCategory.DATABASE: [
+                "database", "schema", "table", "sql", "query", "migration",
+                "mysql", "postgres", "mongodb", "redis", "sqlite", "prisma",
+                "sequelize", "sqlalchemy", "orm", "crud"
+            ],
+            IntentCategory.TRANSLATION: [
+                "translate", "translation", "localize", "localization",
+                "i18n", "l10n", "multilingual"
+            ],
+            IntentCategory.SUMMARIZATION: [
+                "summarize", "summary", "summarise", "tldr", "tl;dr",
+                "brief", "overview", "key points", "takeaways", "gist"
+            ],
+            IntentCategory.EXPLANATION: [
+                "explain", "explanation", "what is", "how does", "why",
+                "understand", "elaborate", "simplify", "break down"
+            ],
+            IntentCategory.CREATIVE_WRITING: [
+                "story", "poem", "poetry", "novel", "fiction", "creative",
+                "narrative", "lyrics", "haiku", "limerick", "storytelling"
+            ],
+            IntentCategory.MATHEMATICAL: [
+                "calculate", "compute", "solve", "math", "equation",
+                "formula", "integral", "derivative", "proof", "algebra",
+                "calculus", "geometry", "statistics", "probability"
+            ],
+            IntentCategory.RESEARCH: [
+                "research", "find", "search", "investigate", "study",
+                "academic", "scholarly", "citation", "reference", "literature"
+            ],
         }
 
     def _has_negation(self, text: str, keyword_pos: int) -> bool:
         words_before = text[:keyword_pos].lower().split()[-6:]
-        return any(neg in " ".join(words_before) for neg in self.negation_words)
+        preceding_text = " ".join(words_before)
+        return any(neg in preceding_text for neg in self.negation_words)
 
-    def _calculate_confidence(self, matched_keywords, matched_patterns, text_length) -> float:
-        if not matched_keywords and not matched_patterns: return 0.0
-        return min((min(len(matched_patterns) * 0.35, 0.65) + min(len(matched_keywords) * 0.12, 0.25) + (0.1 if matched_keywords and matched_patterns else 0.0)) * max(0.5, 1.0 - (text_length / 1500) * 0.4), 1.0)
+    def _calculate_confidence(
+            self,
+            matched_keywords: List[str],
+            matched_patterns: List[str],
+            text_length: int
+    ) -> float:
+        if not matched_keywords and not matched_patterns:
+            return 0.0
 
-    def _are_related_intents(self, i1: IntentCategory, i2: IntentCategory) -> bool:
-        groups = [{IntentCategory.CODE_GENERATION, IntentCategory.CODE_REVIEW, IntentCategory.CODE_DEBUG, IntentCategory.CODE_EXECUTION}, {IntentCategory.DATA_ANALYSIS, IntentCategory.DATA_VISUALIZATION}, {IntentCategory.IMAGE_GENERATION, IntentCategory.VIDEO_GENERATION, IntentCategory.AUDIO_GENERATION}, {IntentCategory.RESEARCH, IntentCategory.WEB_SEARCH}]
-        return any(i1 in g and i2 in g for g in groups)
+        pattern_confidence = min(len(matched_patterns) * 0.35, 0.65)
+        keyword_confidence = min(len(matched_keywords) * 0.12, 0.25)
+        multi_signal_bonus = 0.1 if (matched_keywords and matched_patterns) else 0.0
+        length_factor = max(0.5, 1.0 - (text_length / 1500) * 0.4)
+
+        confidence = (pattern_confidence + keyword_confidence + multi_signal_bonus) * length_factor
+        return min(confidence, 1.0)
+
+    def _are_related_intents(self, intent1: IntentCategory, intent2: IntentCategory) -> bool:
+        related_groups = [
+            {IntentCategory.CODE_GENERATION, IntentCategory.CODE_REVIEW, IntentCategory.CODE_DEBUG},
+            {IntentCategory.DATA_ANALYSIS, IntentCategory.DATA_VISUALIZATION},
+            {IntentCategory.IMAGE_GENERATION, IntentCategory.VIDEO_GENERATION, IntentCategory.AUDIO_GENERATION},
+            {IntentCategory.WEB_DEVELOPMENT, IntentCategory.API_DEVELOPMENT, IntentCategory.DATABASE},
+            {IntentCategory.DOCUMENT_CREATION, IntentCategory.RESEARCH},
+            {IntentCategory.EXPLANATION, IntentCategory.SUMMARIZATION},
+        ]
+        for group in related_groups:
+            if intent1 in group and intent2 in group:
+                return True
+        return False
 
     def detect_intents(self, text: str, threshold: float = 0.25) -> List[IntentResult]:
         text_lower = text.lower()
         results = []
-        for intent, patterns in self.compiled_patterns.items():
-            matched_keywords, matched_patterns = [], []
-            for p in patterns:
-                if p.search(text): matched_patterns.append(p.pattern)
-            for syn in self.synonyms.get(intent, []):
-                if syn in text_lower:
-                    pos = text_lower.find(syn)
-                    if not self._has_negation(text, pos): matched_keywords.append(syn)
+
+        for intent, compiled_patterns in self.compiled_patterns.items():
+            matched_keywords = []
+            matched_patterns = []
+
+            for pattern in compiled_patterns:
+                if pattern.search(text):
+                    matched_patterns.append(pattern.pattern)
+
+            if intent in self.synonyms:
+                for synonym in self.synonyms[intent]:
+                    if synonym in text_lower:
+                        pos = text_lower.find(synonym)
+                        if not self._has_negation(text, pos):
+                            matched_keywords.append(synonym)
+
             if matched_keywords or matched_patterns:
-                conf = self._calculate_confidence(matched_keywords, matched_patterns, len(text))
-                if conf >= threshold:
-                    results.append(IntentResult(intent=intent, confidence=conf, sub_intents=[], keywords_matched=matched_keywords, patterns_matched=matched_patterns, legacy_intent=self.legacy_intent_map.get(intent, "chat")))
+                confidence = self._calculate_confidence(
+                    matched_keywords, matched_patterns, len(text)
+                )
+                if confidence >= threshold:
+                    results.append(IntentResult(
+                        intent=intent,
+                        confidence=confidence,
+                        sub_intents=[],
+                        keywords_matched=matched_keywords,
+                        patterns_matched=matched_patterns
+                    ))
+
         results.sort(key=lambda x: x.confidence, reverse=True)
+
         if results:
-            for r in results[1:]:
-                if self._are_related_intents(results[0].intent, r.intent): results[0].sub_intents.append(r.intent)
+            primary = results[0]
+            for result in results[1:]:
+                if self._are_related_intents(primary.intent, result.intent):
+                    primary.sub_intents.append(result.intent)
+
         return results[:1] if results else []
 
     def get_primary_intent(self, text: str) -> Optional[IntentResult]:
@@ -1012,569 +1441,2229 @@ class AdvancedIntentDetector:
 
     def get_action_type(self, text: str) -> str:
         intent = self.get_primary_intent(text)
-        return intent.legacy_intent if intent else "chat"
+        if not intent:
+            return "general"
+
+        action_map = {
+            IntentCategory.IMAGE_GENERATION: "image",
+            IntentCategory.VIDEO_GENERATION: "video",
+            IntentCategory.AUDIO_GENERATION: "audio",
+            IntentCategory.CODE_GENERATION: "code",
+            IntentCategory.CODE_REVIEW: "code",
+            IntentCategory.CODE_DEBUG: "code",
+            IntentCategory.DOCUMENT_CREATION: "document",
+            IntentCategory.DATA_ANALYSIS: "data",
+            IntentCategory.DATA_VISUALIZATION: "data",
+            IntentCategory.WEB_DEVELOPMENT: "web",
+            IntentCategory.API_DEVELOPMENT: "api",
+            IntentCategory.DATABASE: "database",
+            IntentCategory.TRANSLATION: "translation",
+            IntentCategory.SUMMARIZATION: "summary",
+            IntentCategory.EXPLANATION: "explanation",
+            IntentCategory.CREATIVE_WRITING: "creative",
+            IntentCategory.MATHEMATICAL: "math",
+            IntentCategory.RESEARCH: "research",
+            IntentCategory.CONVERSATION: "conversation",
+        }
+        return action_map.get(intent.intent, "general")
 
     def get_required_tools(self, text: str) -> List[str]:
         intent = self.get_primary_intent(text)
-        if not intent: return ["llm"]
-        tool_map = {IntentCategory.IMAGE_GENERATION: ["image_gen", "llm"], IntentCategory.VIDEO_GENERATION: ["video_gen", "llm"], IntentCategory.AUDIO_GENERATION: ["audio_gen", "llm"], IntentCategory.CODE_GENERATION: ["code_gen", "llm"], IntentCategory.CODE_EXECUTION: ["code_exec", "llm"], IntentCategory.DATA_ANALYSIS: ["code_exec", "data_processing", "llm"], IntentCategory.MATHEMATICAL: ["wolfram", "code_exec", "llm"], IntentCategory.RESEARCH: ["web_search", "llm"], IntentCategory.WEB_SEARCH: ["web_search", "llm"], IntentCategory.TEXT_TO_SPEECH: ["tts", "llm"], IntentCategory.VISION_ANALYSIS: ["vision", "llm"]}
-        return list(tool_map.get(intent.intent, ["llm"]))
+        if not intent:
+            return ["llm"]
+
+        tool_map = {
+            IntentCategory.IMAGE_GENERATION: ["image_gen", "llm"],
+            IntentCategory.VIDEO_GENERATION: ["video_gen", "llm"],
+            IntentCategory.AUDIO_GENERATION: ["audio_gen", "llm"],
+            IntentCategory.CODE_GENERATION: ["code_exec", "llm"],
+            IntentCategory.CODE_REVIEW: ["llm"],
+            IntentCategory.CODE_DEBUG: ["code_exec", "llm"],
+            IntentCategory.DOCUMENT_CREATION: ["doc_gen", "llm"],
+            IntentCategory.DATA_ANALYSIS: ["code_exec", "data_processing", "llm"],
+            IntentCategory.DATA_VISUALIZATION: ["code_exec", "llm"],
+            IntentCategory.WEB_DEVELOPMENT: ["code_exec", "llm"],
+            IntentCategory.API_DEVELOPMENT: ["code_exec", "llm"],
+            IntentCategory.DATABASE: ["database", "code_exec", "llm"],
+            IntentCategory.TRANSLATION: ["llm"],
+            IntentCategory.SUMMARIZATION: ["llm"],
+            IntentCategory.EXPLANATION: ["llm"],
+            IntentCategory.CREATIVE_WRITING: ["llm"],
+            IntentCategory.MATHEMATICAL: ["code_exec", "llm"],
+            IntentCategory.RESEARCH: ["web_search", "llm"],
+            IntentCategory.CONVERSATION: ["llm"],
+        }
+
+        tools = list(tool_map.get(intent.intent, ["llm"]))
+
+        for sub_intent in intent.sub_intents:
+            for tool in tool_map.get(sub_intent, []):
+                if tool not in tools:
+                    tools.append(tool)
+
+        return tools
 
     def get_code_system_prompt(self, text: str) -> str:
+        base = get_system_prompt(text)
+        
         intent = self.get_primary_intent(text)
-        prompts = {IntentCategory.CODE_DEBUG: "Expert debugger. Identify root cause, explain WHY, provide exact fix.", IntentCategory.CODE_REVIEW: "Senior code reviewer. Check quality, bugs, security, performance.", IntentCategory.CODE_GENERATION: "Generate clean, well-documented code. Return ONLY code in a code block."}
-        return prompts.get(intent.intent if intent else None, "Generate clean, well-documented code.")
+        if not intent:
+            return base + "\n\nYou are also a helpful coding assistant."
 
+        sub_prompts = {
+            IntentCategory.CODE_DEBUG: """
+
+You are also an expert debugger. When analyzing code issues:
+1. Identify the root cause of the bug/error
+2. Explain WHY it's happening (not just what)
+3. Provide the exact fix with clear code blocks
+4. Suggest how to prevent similar issues
+Be precise and practical.""",
+
+            IntentCategory.CODE_REVIEW: """
+
+You are also a senior code reviewer. Provide constructive feedback on:
+1. Code quality and readability
+2. Potential bugs or edge cases
+3. Performance considerations
+4. Best practices and design patterns
+5. Security concerns
+Be specific and actionable in your suggestions.""",
+
+            IntentCategory.CODE_GENERATION: """
+
+You are also an expert software engineer. When writing code:
+1. Write clean, well-structured, production-ready code
+2. Include appropriate error handling
+3. Add helpful comments for complex logic
+4. Consider edge cases
+5. Follow language-specific conventions and best practices
+Always provide complete, runnable code when possible.""",
+
+            IntentCategory.WEB_DEVELOPMENT: """
+
+You are also a full-stack web developer expert. When building web components:
+1. Use modern best practices and frameworks
+2. Ensure responsive design
+3. Consider accessibility (a11y)
+4. Include proper styling
+5. Make components reusable and maintainable
+Provide complete, ready-to-use code.""",
+
+            IntentCategory.API_DEVELOPMENT: """
+
+You are also an API development expert. When creating APIs:
+1. Follow RESTful principles (or GraphQL best practices)
+2. Include proper error handling and status codes
+3. Add input validation
+4. Consider security (auth, rate limiting)
+5. Document endpoints clearly
+Provide complete, production-ready code.""",
+
+            IntentCategory.DATABASE: """
+
+You are also a database expert. When working with databases:
+1. Design efficient, normalized schemas
+2. Write optimized queries
+3. Include proper indexes
+4. Consider data integrity with constraints
+5. Follow SQL best practices
+Provide complete, ready-to-execute SQL/ORM code.""",
+        }
+
+        return base + sub_prompts.get(intent.intent, "\n\nYou are also a helpful coding assistant.")
+
+
+# Singleton instance
 _detector = None
+
+
 def get_detector() -> AdvancedIntentDetector:
     global _detector
     if _detector is None:
         _detector = AdvancedIntentDetector()
     return _detector
 
-def detect_intent(prompt: str) -> tuple:
-    if not prompt: return ("chat", 0.0)
-    result = get_detector().get_primary_intent(prompt)
-    return (result.legacy_intent, result.confidence) if result else ("chat", 0.0)
 
-def detect_intent_advanced(prompt: str) -> Optional[IntentResult]:
+# =========================
+# BACKWARD COMPATIBLE FUNCTIONS
+# =========================
+def is_image_request(prompt: str) -> bool:
+    return get_detector().get_action_type(prompt) == "image"
+
+
+def is_video_request(prompt: str) -> bool:
+    return get_detector().get_action_type(prompt) == "video"
+
+
+def is_code_request(prompt: str) -> bool:
+    return get_detector().get_action_type(prompt) == "code"
+
+
+def is_document_request(prompt: str) -> bool:
+    return get_detector().get_action_type(prompt) == "document"
+
+
+def is_data_request(prompt: str) -> bool:
+    return get_detector().get_action_type(prompt) == "data"
+
+
+# =========================
+# NEW ADVANCED FUNCTIONS
+# =========================
+def detect_intent(prompt: str) -> Optional[IntentResult]:
     return get_detector().get_primary_intent(prompt)
+
+
+def get_action_type(prompt: str) -> str:
+    return get_detector().get_action_type(prompt)
+
 
 def get_required_tools(prompt: str) -> List[str]:
     return get_detector().get_required_tools(prompt)
 
 
-# ---------- Request/Response Models ----------
-class UniversalRequest(BaseModel):
-    prompt: str = Field(..., description="The prompt or query")
-    context: Optional[str] = None
-    user_id: Optional[str] = None
-    session_id: Optional[str] = None
-    model: Optional[str] = None
-    temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 4096
-    stream: Optional[bool] = False
-    tools: Optional[List[str]] = None
-    files: Optional[List[str]] = None
-    metadata: Optional[Dict[str, Any]] = None
+def is_debug_request(prompt: str) -> bool:
+    intent = detect_intent(prompt)
+    return intent and intent.intent == IntentCategory.CODE_DEBUG
 
-# ---------- Helper Functions ----------
-def get_groq_headers() -> dict:
+
+def is_review_request(prompt: str) -> bool:
+    intent = detect_intent(prompt)
+    return intent and intent.intent == IntentCategory.CODE_REVIEW
+
+
+def get_intent_confidence(prompt: str) -> float:
+    intent = detect_intent(prompt)
+    return intent.confidence if intent else 0.0
+
+
+# =========================
+# MODELS
+# =========================
+class ChatRequest(BaseModel):
+    prompt: str
+    conversation_id: Optional[str] = None
+    stream: bool = True
+    remember: bool = True  # New: persist session
+
+
+class RegenerateRequest(BaseModel):
+    conversation_id: str
+
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "rachel"
+
+
+class IntentInfo(BaseModel):
+    intent: str
+    confidence: float
+    sub_intents: List[str]
+    action_type: str
+    tools: List[str]
+
+
+class FileAnalysisResponse(BaseModel):
+    content: str
+    metadata: Dict[str, Any]
+    files: List[Dict[str, Any]] = []
+    truncated: bool = False
+
+
+# =========================
+# HELPERS
+# =========================
+def sse(data: dict) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def _execute_supabase_with_retry(query_builder, description="Supabase Operation"):
+    max_retries = 3
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            return await asyncio.to_thread(query_builder.execute)
+        except Exception as e:
+            last_exception = e
+            error_str = str(e)
+            if "502" in error_str or "Bad Gateway" in error_str or "Expecting value" in error_str:
+                logger.warning(f"{description} encountered transient error (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1 * (attempt + 1))
+                    continue
+            else:
+                logger.error(f"{description} failed: {e}")
+                break
+    
+    if last_exception:
+        raise last_exception
+
+
+async def get_user(
+    request: Request,
+    response: Response,
+    remember: Optional[bool] = None
+) -> Dict[str, Any]:
+    """
+    Production-grade user recognition with:
+    - Session token validation
+    - Multi-cookie fallback strategy
+    - Device fingerprinting
+    - Session refresh logic
+    - Automatic session creation
+    """
+    await cleanup_session_cache()
+    
+    # Get all cookie values
+    primary_id = request.cookies.get(PRIMARY_COOKIE)
+    backup_id = request.cookies.get(BACKUP_COOKIE)
+    device_cookie = request.cookies.get(DEVICE_COOKIE)
+    stored_fingerprint = request.cookies.get(FINGERPRINT_COOKIE)
+    session_token = request.cookies.get(SESSION_TOKEN_COOKIE)
+    session_expiry = request.cookies.get(SESSION_EXPIRY_COOKIE)
+    
+    # Generate current fingerprint
+    current_fingerprint = generate_device_fingerprint(request)
+    
+    # Determine remember preference
+    if remember is None:
+        # Default to True unless session is about to expire
+        remember = not is_session_expired(session_expiry or "0")
+    
+    user_obj = {
+        "id": None,
+        "email": None,
+        "memory": "",
+        "fingerprint": current_fingerprint,
+        "session_valid": False,
+        "session_token": None
+    }
+
+    # Priority 1: Validate existing session token
+    user_id = None
+    if primary_id and session_token:
+        # Check if session is expired
+        if is_session_expired(session_expiry or "0"):
+            logger.info(f"Session expired for user {primary_id[:8]}...")
+            clear_session_cookies(response)
+        else:
+            # Validate token
+            token_valid = await validate_session_token(primary_id, session_token)
+            if token_valid:
+                user_id = primary_id
+                user_obj["session_valid"] = True
+                user_obj["session_token"] = session_token
+                
+                # Check if session should be refreshed
+                if should_refresh_session(session_expiry or "0"):
+                    logger.info(f"Refreshing session for user {user_id[:8]}...")
+                    new_token = await create_user_session(user_id, current_fingerprint, remember)
+                    user_obj["session_token"] = new_token
+            else:
+                logger.warning(f"Invalid session token for user {primary_id[:8]}...")
+    
+    # Priority 2: Try backup cookie
+    if not user_id and backup_id:
+        user_id = backup_id
+        logger.info(f"User recovered via backup cookie: {user_id[:8]}...")
+    
+    # Priority 3: Try device fingerprint lookup
+    if not user_id and device_cookie:
+        try:
+            fp_part = device_cookie.split("_")[0] if "_" in device_cookie else device_cookie
+            fp_resp = await _execute_supabase_with_retry(
+                supabase.table("users").select("id").eq("fingerprint", fp_part).limit(1),
+                description="User Lookup by Fingerprint"
+            )
+            if fp_resp.data:
+                user_id = fp_resp.data[0]["id"]
+                logger.info(f"User recovered via device fingerprint: {user_id[:8]}...")
+        except Exception as e:
+            logger.error(f"Fingerprint lookup failed: {e}")
+
+    # Priority 4: Try stored fingerprint
+    if not user_id and stored_fingerprint:
+        try:
+            fp_resp = await _execute_supabase_with_retry(
+                supabase.table("users").select("id").eq("fingerprint", stored_fingerprint).limit(1),
+                description="User Lookup by Stored Fingerprint"
+            )
+            if fp_resp.data:
+                user_id = fp_resp.data[0]["id"]
+                logger.info(f"User recovered via stored fingerprint: {user_id[:8]}...")
+        except Exception as e:
+            logger.error(f"Stored fingerprint lookup failed: {e}")
+
+    # Load user data if we found an ID
+    if user_id:
+        try:
+            user_resp = await _execute_supabase_with_retry(
+                supabase.table("users").select("*").eq("id", user_id).limit(1),
+                description="User Lookup by ID"
+            )
+            if user_resp.data:
+                u = user_resp.data[0]
+                user_obj = {
+                    "id": u["id"],
+                    "email": u.get("email"),
+                    "memory": u.get("memory", ""),
+                    "is_premium": u.get("is_premium", False),
+                    "is_lifetime": u.get("is_lifetime", False),
+                    "plan": u.get("plan", "free"),
+                    "fingerprint": current_fingerprint,
+                    "session_valid": user_obj.get("session_valid", False),
+                    "session_token": user_obj.get("session_token")
+                }
+                
+                # Update fingerprint if changed
+                if u.get("fingerprint") != current_fingerprint:
+                    try:
+                        await _execute_supabase_with_retry(
+                            supabase.table("users").update({"fingerprint": current_fingerprint}).eq("id", user_id),
+                            description="Update Fingerprint"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to update fingerprint: {e}")
+                
+                # Create or refresh session
+                if not user_obj["session_valid"]:
+                    new_token = await create_user_session(user_id, current_fingerprint, remember)
+                    user_obj["session_token"] = new_token
+                    user_obj["session_valid"] = True
+                
+                # Set all cookies
+                set_session_cookies(response, user_id, current_fingerprint, user_obj["session_token"], remember)
+                
+                logger.info(f"User authenticated: {user_id[:8]}... session_valid={user_obj['session_valid']}")
+                return user_obj
+        except Exception as e:
+            logger.error(f"User data fetch failed: {e}")
+
+    # Create new anonymous user
+    new_id = str(uuid.uuid4())
+    
+    try:
+        new_user_data = {
+            "id": new_id,
+            "email": f"anon+{new_id[:8]}@local",
+            "memory": "",
+            "fingerprint": current_fingerprint
+        }
+        
+        await _execute_supabase_with_retry(
+            supabase.table("users").upsert(new_user_data, on_conflict="id"),
+            description="Create Anonymous User"
+        )
+        
+        user_obj["id"] = new_id
+        
+    except Exception as e:
+        logger.error(f"Failed to create anonymous user: {e}")
+        user_obj["id"] = new_id
+
+    # Create session for new user
+    new_token = await create_user_session(new_id, current_fingerprint, remember)
+    user_obj["session_token"] = new_token
+    user_obj["session_valid"] = True
+    
+    # Set all cookies
+    set_session_cookies(response, new_id, current_fingerprint, new_token, remember)
+    
+    logger.info(f"New user created: {new_id[:8]}... with fingerprint {current_fingerprint[:8]}...")
+    
+    return user_obj
+
+async def update_user_memory(user_id: str, new_memory: str):
+    """Update the user's long-term memory in the database."""
+    try:
+        await _execute_supabase_with_retry(
+            supabase.table("users").update({"memory": new_memory}).eq("id", user_id),
+            description="Update User Memory"
+        )
+        # Update cache
+        if user_id in _session_cache:
+            _session_cache[user_id]["memory"] = new_memory
+    except Exception as e:
+        logger.error(f"Failed to update user memory: {e}")
+
+
+def get_groq_headers():
     return {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
 
-def detect_language(prompt: str) -> str:
-    lang_map = {"python": ["python", "py", "django", "flask"], "javascript": ["javascript", "js", "node", "react", "typescript", "ts"], "java": ["java", "spring"], "cpp": ["c++", "cpp"], "go": ["golang", "go lang"], "rust": ["rust", "rustlang"], "sql": ["sql", "mysql", "postgres"]}
-    for lang, keywords in lang_map.items():
-        if any(k in prompt.lower() for k in keywords): return lang
-    return "python"
 
-def get_elevenlabs_voice_id(voice_name: str) -> str:
-    return {"alloy": "21m00Tcm4TlvDq8ikWAM", "rachel": "21m00Tcm4TlvDq8ikWAM", "adam": "pNInz6obpgDQGcFmaJgB", "antoni": "ErXwobaYiVQHn1TqBp", "bella": "EXAVITQu4vr4xnSDxMaL"}.get(voice_name.lower(), "21m00Tcm4TlvDq8ikWAM")
+def get_openai_headers():
+    return {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
 
-async def extract_document_text(doc: str) -> str:
-    try:
-        if doc.startswith("http"):
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(doc)
-                resp.raise_for_status()
-                data = resp.content
-        else:
-            if "," in doc: doc = doc.split(",", 1)[1]
-            data = base64.b64decode(doc)
-        try:
-            doc_pdf = fitz.open(stream=data, filetype="pdf")
-            text = "\n".join([page.get_text() for page in doc_pdf])
-            if text.strip(): return text
-        except: pass
-        try:
-            doc_docx = docx.Document(io.BytesIO(data))
-            text = "\n".join([p.text for p in doc_docx.paragraphs])
-            if text.strip(): return text
-        except: pass
-        return data.decode("utf-8", errors="ignore")
-    except Exception as e:
-        return f"[Error: {str(e)}]"
 
-async def serper_search(query: str) -> list:
-    if not SERPER_API_KEY: return []
+def get_elevenlabs_headers():
+    return {"xi-api-key": ELEVENLABS_API_KEY}
+
+
+# =========================
+# VIDEO WATERMARK SYSTEM
+# =========================
+async def fetch_logo_image() -> Optional[bytes]:
+    """Fetch the logo.png from the configured URL"""
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post("https://google.serper.dev/search", headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"}, data=json.dumps({"q": query, "num": 10}))
-            data = response.json()
-            results = []
-            if data.get("knowledgeGraph"):
-                kg = data["knowledgeGraph"]
-                results.append({"title": kg.get("title", "Summary"), "snippet": kg.get("description", ""), "url": kg.get("descriptionLink", ""), "type": "knowledge_graph"})
-            for item in data.get("organic", [])[:8]:
-                results.append({"title": item.get("title"), "snippet": item.get("snippet"), "url": item.get("link"), "type": "organic"})
-            return results
+            response = await client.get(LOGO_URL)
+            if response.status_code == 200:
+                return response.content
+            logger.error(f"Failed to fetch logo: HTTP {response.status_code}")
     except Exception as e:
-        logger.error(f"Serper search failed: {e}")
-        return []
+        logger.error(f"Logo fetch error: {e}")
+    return None
 
-async def tell_joke(category: str) -> dict:
+
+async def add_watermark_to_video(video_url: str) -> str:
+    """Add transparent watermark to video"""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Tell a funny {category} joke. Return only the joke."}], "max_tokens": 200, "temperature": 0.9})
-            return {"joke": r.json()["choices"][0]["message"]["content"]}
-    except: return {"joke": "Why don't scientists trust atoms? Because they make up everything!"}
+        from moviepy.editor import VideoFileClip, ImageClip, CompositeVideoClip
+        import tempfile
+        
+        logo_bytes = await fetch_logo_image()
+        if not logo_bytes:
+            logger.warning("No logo available, returning unwatermarked video")
+            return video_url
+        
+        async with httpx.AsyncClient(timeout=120) as client:
+            video_response = await client.get(video_url)
+            if video_response.status_code != 200:
+                logger.error(f"Failed to download video: HTTP {video_response.status_code}")
+                return video_url
+            video_bytes = video_response.content
+        
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video_path = os.path.join(tmpdir, "input.mp4")
+            logo_path = os.path.join(tmpdir, "logo.png")
+            output_path = os.path.join(tmpdir, "output.mp4")
+            
+            with open(video_path, "wb") as f:
+                f.write(video_bytes)
+            with open(logo_path, "wb") as f:
+                f.write(logo_bytes)
+            
+            def process_video():
+                video = VideoFileClip(video_path)
+                logo_width = int(video.w * 0.15)
+                logo = ImageClip(logo_path)
+                logo_aspect = logo.h / logo.w
+                logo_height = int(logo_width * logo_aspect)
+                logo = logo.resize((logo_width, logo_height))
+                padding = 20
+                logo = logo.set_position((video.w - logo_width - padding, video.h - logo_height - padding))
+                logo = logo.set_duration(video.duration)
+                logo = logo.set_opacity(0.7)
+                final = CompositeVideoClip([video, logo])
+                final.write_videofile(
+                    output_path,
+                    codec="libx264",
+                    audio_codec="aac",
+                    temp_audiofile=os.path.join(tmpdir, "temp_audio.m4a"),
+                    remove_temp=True,
+                    logger=None
+                )
+                video.close()
+                logo.close()
+                final.close()
+                return output_path
+            
+            output_path = await asyncio.to_thread(process_video)
+            
+            with open(output_path, "rb") as f:
+                watermarked_bytes = f.read()
+            
+            filename = f"watermarked_{uuid.uuid4().hex}.mp4"
+            path = f"public/videos/{filename}"
+            
+            try:
+                await asyncio.to_thread(
+                    lambda: supabase.storage.from_("ai-videos").upload(
+                        path, watermarked_bytes, {"content-type": "video/mp4"}
+                    )
+                )
+                watermarked_url = f"{SUPABASE_URL}/storage/v1/object/public/ai-videos/{path}"
+                logger.info(f"Watermarked video uploaded: {watermarked_url}")
+                return watermarked_url
+            except Exception as upload_err:
+                logger.warning(f"Storage upload failed, using data URI: {upload_err}")
+                b64_video = base64.b64encode(watermarked_bytes).decode()
+                return f"data:video/mp4;base64,{b64_video}"
+                
+    except ImportError:
+        logger.error("moviepy not installed")
+        return video_url
+    except Exception as e:
+        logger.error(f"Watermark error: {e}")
+        return video_url
 
-async def solve_math(prompt: str) -> dict:
-    if WOLFRAM_ALPHA_API_KEY:
-        try:
-            client = wolframalpha.Client(WOLFRAM_ALPHA_API_KEY)
-            res = client.query(prompt)
-            return {"answer": next(res.results).text, "method": "wolfram"}
-        except: pass
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Solve step by step:\n{prompt}"}], "max_tokens": 1000, "temperature": 0.2})
-            return {"answer": r.json()["choices"][0]["message"]["content"], "method": "llm"}
-    except: return {"answer": "Unable to solve", "method": "none"}
 
-async def chat_with_tools(user_id: str, messages: list) -> str:
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": messages, "max_tokens": 4096, "temperature": 0.7})
+# =========================
+# CORE LOGIC
+# =========================
+async def save_message(user_id: str, conv_id: str, role: str, content: str):
+    data = {
+        "id": str(uuid.uuid4()),
+        "conversation_id": conv_id,
+        "role": role,
+        "content": content,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await _execute_supabase_with_retry(
+        supabase.table("messages").insert(data),
+        description="Save Message"
+    )
+
+
+async def handle_text_analysis(
+    text: str,
+    stream: bool,
+    user_prompt: str = "",
+    file_metadata: Dict[str, Any] = None
+):
+    text = text[:MAX_TEXT_LENGTH]
+    
+    # Build context from file metadata
+    file_context = ""
+    if file_metadata:
+        file_context = f"\n\nFile Information:\n"
+        for key, value in file_metadata.items():
+            if key != "files":  # Don't include full file list in prompt
+                file_context += f"- {key}: {value}\n"
+    
+    messages = [
+        {
+            "role": "system",
+            "content": get_system_prompt(user_prompt) + f"""
+
+You analyze files and code. Detect the type automatically and respond accordingly:
+
+- Code files → explain functionality, find bugs, suggest improvements, document
+- PDF/docs → summarize content, extract key insights
+- Data files → identify patterns, suggest analysis approaches
+- Logs → find errors, identify issues, suggest fixes
+- Archives → summarize extracted content from multiple files
+
+Be structured and clear. Use code blocks with appropriate language tags.
+Preserve important technical details.{file_context}"""
+        },
+        {
+            "role": "user",
+            "content": text
+        }
+    ]
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            try:
+                async for token in stream_groq_chat(messages):
+                    if task.cancelled():
+                        break
+                    yield sse({"type": "token", "text": token})
+                yield sse({"type": "done"})
+            except Exception as e:
+                logger.error(f"Text analysis stream error: {e}")
+                yield sse({"type": "error", "message": "Analysis failed."})
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=get_groq_headers(),
+            json={
+                "model": DEFAULT_LLM_MODEL,
+                "messages": messages
+            }
+        )
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
 
-async def fetch_user_memory(user_id: str) -> str:
-    if not user_id or user_id == "anonymous": return ""
-    try:
-        res = await asyncio.to_thread(lambda: supabase.table("user_memories").select("category, content").eq("user_id", user_id).order("last_referenced", desc=True).limit(10).execute())
-        if not res.data: return ""
-        return "User Profile & Memories:\n" + "\n".join([f"- [{m.get('category', 'info')}] {m['content']}" for m in res.data])
-    except: return ""
+    return {"analysis": r.json()["choices"][0]["message"]["content"]}
 
-async def extract_and_save_memory(user_id: str, prompt: str, response: str):
-    if not user_id or user_id == "anonymous": return
+
+async def handle_image_analysis(image_bytes: bytes, stream: bool, user_prompt: str = ""):
+    b64 = base64.b64encode(image_bytes).decode()
+
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": user_prompt or "Analyze this image in detail."},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            ]
+        }]
+    }
+
+    # FIXED: Added timeout=60.0 to prevent ReadTimeout errors
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=get_openai_headers(),
+            json=payload
+        )
+        r.raise_for_status()
+
+    result = r.json()["choices"][0]["message"]["content"]
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            try:
+                yield sse({"type": "text", "text": result})
+                yield sse({"type": "done"})
+            except Exception as e:
+                logger.error(f"Image analysis stream error: {e}")
+                yield sse({"type": "error", "message": "Analysis failed."})
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    return {"analysis": result}
+
+
+async def get_history(conv_id: str, limit: int = 10):
+    res = await _execute_supabase_with_retry(
+        supabase.table("messages")
+        .select("role, content")
+        .eq("conversation_id", conv_id)
+        .order("created_at", desc=False)
+        .limit(limit),
+        description="Get History"
+    )
+    return [{"role": m["role"], "content": m["content"]} for m in (res.data or [])]
+
+
+async def stream_groq_chat(messages: list, model: str = DEFAULT_LLM_MODEL, max_tokens: int = 1024):
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Extract facts about USER from this. Return JSON array of {{\"category\", \"content\"}} or []\nUser: {prompt[:500]}\nAI: {response[:500]}"}], "temperature": 0.1, "max_tokens": 200})
-            raw = r.json()["choices"][0]["message"]["content"]
-            if "```json" in raw: raw = raw.split("```json")[1].split("```")[0]
-            for fact in json.loads(raw):
-                if fact.get("content"):
-                    await asyncio.to_thread(lambda f=fact: supabase.table("user_memories").upsert({"user_id": user_id, "category": f.get("category", "info"), "content": f["content"], "last_referenced": datetime.utcnow().isoformat()}, on_conflict="user_id,content").execute())
-    except: pass
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "POST",
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=get_groq_headers(),
+                json={"model": model, "messages": messages, "stream": True, "max_tokens": max_tokens}
+            ) as resp:
+                
+                if resp.status_code != 200:
+                    error_text = await resp.aread()
+                    logger.error(f"Groq API Error {resp.status_code}: {error_text}")
+                    raise Exception(f"AI Service Error ({resp.status_code})")
+
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            delta = chunk["choices"][0]["delta"].get("content")
+                            if delta:
+                                yield delta
+                        except:
+                            pass
+    except httpx.ConnectError:
+        logger.error("Failed to connect to Groq API.")
+        raise Exception("Connection to AI service failed.")
+    except Exception as e:
+        logger.error(f"Stream generation error: {e}")
+        raise e
+
+
+async def handle_code_assistant(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
+    system_prompt = get_detector().get_code_system_prompt(prompt)
+    
+    user_memory = user.get("memory", "")
+    if user_memory:
+        system_prompt += f"\n\nUser Context: {user_memory}"
+
+    history = await get_history(conv_id) if conv_id else []
+    messages = [{"role": "system", "content": system_prompt}] + history
+
+    intent_result = detect_intent(prompt)
+    logger.info(
+        f"[CODE] sub_intent={intent_result.intent.value if intent_result else 'none'} "
+        f"confidence={(intent_result.confidence if intent_result else 0):.2%}"
+    )
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            active_streams[user["id"]] = task
+            try:
+                full_text = ""
+                # Using Llama 3.1 405B for coding as requested
+                async for token in stream_groq_chat(messages, model=CODE_MODEL):
+                    if task.cancelled():
+                        break
+                    full_text += token
+                    yield sse({"type": "token", "text": token})
+
+                # MEMORY UPDATE LOGIC: Update user memory with a summary of the interaction
+                # For a production app, you might want to extract specific facts rather than appending full text.
+                # Here we append a truncated summary to ensure the "memory" feature works.
+                if user_memory:
+                    new_memory = user_memory + "\n" + full_text[-500:]
+                else:
+                    new_memory = full_text[-1000:] # Keep last 1000 chars as memory
+                
+                if len(new_memory) > 5000: # Limit memory size
+                    new_memory = new_memory[-5000:]
+                
+                # Update asynchronously, don't block response
+                asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+                if conv_id:
+                    try:
+                        await save_message(user["id"], conv_id, "assistant", full_text)
+                    except Exception as e:
+                        logger.error(f"Failed to save assistant message: {e}")
+                yield sse({"type": "done"})
+            
+            except Exception as e:
+                logger.error(f"Streaming Error: {e}")
+                yield sse({"type": "error", "message": "An error occurred processing your request."})
+            
+            finally:
+                active_streams.pop(user["id"], None)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=get_groq_headers(),
+            json={"model": CODE_MODEL, "messages": messages, "max_tokens": 2048}
+        )
+        r.raise_for_status()
+        reply = r.json()["choices"][0]["message"]["content"]
+        
+        # Sync memory update for non-streaming
+        new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
+        asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+    if conv_id:
+        await save_message(user["id"], conv_id, "assistant", reply)
+    return {"reply": reply}
+
+
+# LAZY LOADING FOR VISION
+vision_model = None
+
+
+def get_vision_model():
+    global vision_model
+    if vision_model is None:
+        from ultralytics import YOLO
+        import torch
+        logger.info("Loading YOLO model...")
+        vision_model = YOLO("yolov8n.pt")
+        if torch.cuda.is_available():
+            vision_model.to("cuda")
+    return vision_model
 
 
 # =========================
 # ENDPOINTS
 # =========================
-@app.post("/analyze-intent")
-async def analyze_intent_endpoint(request: Request):
-    body = await request.json()
+@app.options("/{full_path:path}")
+async def preflight_handler(full_path: str):
+    return Response(status_code=200)
+
+@app.get("/robots.txt")
+def robots():
+    return PlainTextResponse("User-agent: *\nDisallow:")
+
+@app.get("/")
+async def root():
+    return {
+        "status": "running",
+        "service": "HeloxAi Backend",
+        "version": "2.1.0",
+        "features": {
+            "intent_detection": "advanced",
+            "user_recognition": "production-grade",
+            "file_handling": "comprehensive",
+            "session_management": "persistent",
+            "memory": "fixed",
+            "models": {
+                "llm": "llama-3.1-405b-reasoning",
+                "tts": "elevenlabs-multilingual-v2",
+                "stt": "elevenlabs"
+            }
+        }
+    }
+
+
+@app.post("/ask/universal")
+async def ask_universal(req: Request, res: Response):
+    content_type = req.headers.get("content-type", "")
+    
+    # Get remember preference from request
+    remember = True
+    if "application/json" in content_type:
+        try:
+            body = await req.json()
+            remember = body.get("remember", True)
+        except Exception:
+            pass
+
+    if "application/json" in content_type:
+        try:
+            body = await req.json()
+        except Exception:
+            raise HTTPException(400, "Invalid JSON")
+
+    elif "multipart/form-data" in content_type:
+        form = await req.form()
+        body = dict(form)
+
+        if "file" in form:
+            file: UploadFile = form["file"]
+            content = await file.read()
+
+            logger.info(f"File upload: {file.filename} ({format_file_size(len(content))})")
+
+            if file.content_type and file.content_type.startswith("image/"):
+                return await handle_image_analysis(content, stream=True)
+
+            result = await extract_file_content(content, file.filename)
+            return await handle_text_analysis(
+                result.content,
+                stream=True,
+                file_metadata=result.metadata
+            )
+    else:
+        raise HTTPException(415, f"Unsupported content-type: {content_type}")
+
     prompt = body.get("prompt", "")
-    if not prompt: raise HTTPException(400, "Prompt required")
-    intent_result = detect_intent_advanced(prompt)
-    return {"intent": intent_result.to_dict() if intent_result else None, "legacy_intent": intent_result.legacy_intent if intent_result else "chat", "confidence": intent_result.confidence if intent_result else 0.0, "required_tools": get_required_tools(prompt)}
+    conv_id = body.get("conversation_id")
+    stream = body.get("stream", True)
+
+    if not prompt:
+        raise HTTPException(400, "Prompt required")
+
+    user = await get_user(req, res, remember=remember)
+
+    conversation_exists = False
+    
+    if conv_id:
+        check = await _execute_supabase_with_retry(
+            supabase.table("conversations").select("id").eq("id", conv_id).limit(1),
+            description="Check Conversation Existence"
+        )
+        if check.data:
+            conversation_exists = True
+        else:
+            logger.warning(f"Conversation {conv_id} not found in DB. Creating new conversation.")
+            conv_id = str(uuid.uuid4())
+
+    if not conv_id:
+        conv_id = str(uuid.uuid4())
+
+    if not conversation_exists:
+        await _execute_supabase_with_retry(
+            supabase.table("conversations").insert({
+                "id": conv_id, 
+                "user_id": user["id"],
+                "title": prompt[:30] if prompt else "New Chat", 
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }),
+            description="Create Conversation"
+        )
+
+    try:
+        await save_message(user["id"], conv_id, "user", prompt)
+    except Exception as e:
+        logger.error(f"Failed to save user message: {e}")
+
+    intent_result = detect_intent(prompt)
+    action_type = get_action_type(prompt)
+    required_tools = get_required_tools(prompt)
+
+    if intent_result:
+        logger.info(
+            f"[INTENT] action={action_type} "
+            f"intent={intent_result.intent.value} "
+            f"confidence={intent_result.confidence:.2%} "
+            f"sub_intents={[i.value for i in intent_result.sub_intents]} "
+            f"tools={required_tools}"
+        )
+    else:
+        logger.info(f"[INTENT] action=general (no specific intent)")
+
+    handler_map = {
+        "image": handle_image_generation,
+        "video": handle_video_generation,
+        "code": handle_code_assistant,
+        "document": handle_text_analysis,
+        "data": handle_text_analysis,
+        "web": handle_code_assistant,
+        "api": handle_code_assistant,
+        "database": handle_code_assistant,
+    }
+
+    handler = handler_map.get(action_type)
+
+    if handler:
+        if action_type in ("document", "data"):
+            return await handler(prompt, stream, user_prompt=prompt)
+        else:
+            return await handler(prompt, user, conv_id, stream)
+
+    if action_type == "math":
+        return await handle_math_request(prompt, user, conv_id, stream)
+
+    if action_type == "research":
+        return await handle_research_request(prompt, user, conv_id, stream)
+
+    if action_type == "creative":
+        return await handle_creative_request(prompt, user, conv_id, stream)
+
+    if action_type == "translation":
+        return await handle_translation_request(prompt, user, conv_id, stream)
+
+    if action_type == "summary":
+        return await handle_summary_request(prompt, user, conv_id, stream)
+
+    # DEFAULT CHAT
+    if stream:
+        async def event_gen():
+            task = asyncio.current_task()
+            active_streams[user["id"]] = task
+
+            try:
+                try:
+                    history = await get_history(conv_id)
+                except Exception as e:
+                    logger.error(f"History fetch failed: {e}")
+                    history = [] 
+                
+                base_system = get_system_prompt(prompt)
+                user_memory = user.get("memory", "")
+                if user_memory:
+                    base_system += f"\n\nUser Context: {user_memory}"
+                
+                full_history = [{"role": "system", "content": base_system}] + history
+                
+                full_text = ""
+                async for token in stream_groq_chat(full_history):
+                    if task.cancelled():
+                        break
+                    full_text += token
+                    yield sse({"type": "token", "text": token})
+
+                # MEMORY UPDATE LOGIC FOR GENERAL CHAT
+                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
+                if len(new_memory) > 5000:
+                    new_memory = new_memory[-5000:]
+                
+                asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+                try:
+                    await save_message(user["id"], conv_id, "assistant", full_text)
+                except Exception as e:
+                    logger.error(f"Failed to save assistant message: {e}")
+                
+                yield sse({"type": "done"})
+            
+            except Exception as e:
+                logger.error(f"Universal Stream Error: {e}")
+                yield sse({"type": "error", "message": "An error occurred processing your request."})
+            
+            finally:
+                active_streams.pop(user["id"], None)
+
+        return StreamingResponse(event_gen(), media_type="text/event-stream")
+    else:
+        history = await get_history(conv_id)
+        base_system = get_system_prompt(prompt)
+        user_memory = user.get("memory", "")
+        if user_memory:
+            base_system += f"\n\nUser Context: {user_memory}"
+            
+        full_history = [{"role": "system", "content": base_system}] + history
+        
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=get_groq_headers(),
+                json={"model": DEFAULT_LLM_MODEL, "messages": full_history, "max_tokens": 1024}
+            )
+            r.raise_for_status()
+            reply = r.json()["choices"][0]["message"]["content"]
+            
+            new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
+            asyncio.create_task(update_user_memory(user["id"], new_memory))
+            
+            await save_message(user["id"], conv_id, "assistant", reply)
+            return {"reply": reply}
+
+
+# =========================
+# ENHANCED FILE ANALYSIS ENDPOINT
+# =========================
+@app.post("/analysis")
+async def analyze_file(
+    req: Request,
+    file: UploadFile = File(...),
+    stream: bool = True
+):
+    """
+    Enhanced file analysis endpoint supporting:
+    - All code files (.py, .js, .ts, .java, .cpp, .go, .rs, etc.)
+    - Archives (.zip, .tar, .gz, etc.) - extracts and analyzes contents
+    - Documents (.pdf, .txt, .md, .csv, etc.)
+    - Images (visual analysis)
+    - Large files (up to 50MB single, 100MB archives)
+    """
+    user = await get_user(req, Response())
+    
+    # Read file content
+    content = await file.read()
+    filename = file.filename or "unknown"
+    content_type = file.content_type or ""
+    file_size = len(content)
+    
+    logger.info(f"[FILE] Upload: {filename} ({format_file_size(file_size)}, type={content_type})")
+    
+    if not content:
+        raise HTTPException(400, "Empty file")
+    
+    # Check file size limits
+    category = get_file_category(filename)
+    max_allowed = MAX_ZIP_SIZE if category == FileCategory.ARCHIVE else MAX_FILE_SIZE
+    
+    if file_size > max_allowed:
+        raise HTTPException(
+            400, 
+            f"File too large ({format_file_size(file_size)}). Maximum: {format_file_size(max_allowed)}"
+        )
+    
+    # Handle images separately
+    if content_type.startswith("image/") or category == FileCategory.IMAGE:
+        return await handle_image_analysis(content, stream)
+
+    # Extract content from file
+    result = await extract_file_content(content, filename)
+    
+    logger.info(
+        f"[FILE] Extracted: {filename} -> "
+        f"category={result.metadata.get('category')}, "
+        f"truncated={result.truncated}, "
+        f"content_len={len(result.content)}"
+    )
+    
+    # Handle archives with multiple files
+    if category == FileCategory.ARCHIVE and result.files:
+        return await handle_archive_analysis(result, stream)
+    
+    # Handle single file analysis
+    return await handle_text_analysis(
+        result.content,
+        stream,
+        file_metadata=result.metadata
+    )
+
+
+async def handle_archive_analysis(
+    result: FileExtractionResult,
+    stream: bool
+):
+    """Special handling for archive files with multiple extracted files"""
+    
+    # Build a comprehensive analysis prompt
+    files_summary = []
+    code_files = []
+    text_files = []
+    
+    for f in result.files:
+        status = f.get("status", "unknown")
+        if status == "extracted":
+            files_summary.append(f"- {f['name']} ({f.get('size_formatted', '?')}) - {f.get('category', '?')}")
+            if f.get("category") == "code":
+                code_files.append(f)
+            else:
+                text_files.append(f)
+        elif status in ("binary", "media"):
+            files_summary.append(f"- {f['name']} ({f.get('size_formatted', '?')}) - {status}")
+        elif status == "skipped":
+            files_summary.append(f"- {f['name']} - skipped: {f.get('reason', '?')}")
+        else:
+            files_summary.append(f"- {f['name']} - {status}")
+    
+    summary_intro = f"""Archive Analysis: {result.metadata.get('filename', 'unknown')}
+Total entries: {result.metadata.get('entry_count', 0)}
+Processed: {result.metadata.get('processed_count', 0)}
+Text files extracted: {result.metadata.get('extracted_count', 0)}
+
+Files found:
+{chr(10).join(files_summary)}
+
+"""
+
+    full_content = summary_intro + result.content
+    
+    messages = [
+        {
+            "role": "system",
+            "content": get_system_prompt("") + """
+
+You are analyzing an archive file (ZIP, TAR, etc.). The archive contents have been extracted and provided below.
+
+Your task:
+1. Provide an overview of what this archive contains
+2. Identify the main purpose/type of the project or files
+3. If it's a code project, describe the structure, technologies used, and main functionality
+4. Highlight any important files or configurations
+5. Note any potential issues, missing files, or areas of concern
+6. If appropriate, provide a summary of the code functionality
+
+Be organized and clear in your analysis."""
+        },
+        {
+            "role": "user",
+            "content": full_content
+        }
+    ]
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            try:
+                # First, send metadata
+                yield sse({
+                    "type": "file_metadata",
+                    "metadata": result.metadata,
+                    "files": result.files
+                })
+                
+                async for token in stream_groq_chat(messages):
+                    if task.cancelled():
+                        break
+                    yield sse({"type": "token", "text": token})
+                yield sse({"type": "done"})
+            except Exception as e:
+                logger.error(f"Archive analysis stream error: {e}")
+                yield sse({"type": "error", "message": "Analysis failed."})
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=get_groq_headers(),
+            json={"model": DEFAULT_LLM_MODEL, "messages": messages}
+        )
+        r.raise_for_status()
+
+    return {
+        "analysis": r.json()["choices"][0]["message"]["content"],
+        "metadata": result.metadata,
+        "files": result.files
+    }
+
 
 @app.get("/file-types")
 async def get_supported_file_types():
+    """Return list of supported file types"""
     return {
-        "code": sorted(list(CODE_EXTENSIONS)), "document": sorted(list(DOCUMENT_EXTENSIONS)),
-        "data": sorted(list(DATA_EXTENSIONS)), "image": sorted(list(IMAGE_EXTENSIONS)),
-        "audio": sorted(list(AUDIO_EXTENSIONS)), "video": sorted(list(VIDEO_EXTENSIONS)),
+        "code": sorted(list(CODE_EXTENSIONS)),
+        "document": sorted(list(DOCUMENT_EXTENSIONS)),
+        "data": sorted(list(DATA_EXTENSIONS)),
+        "image": sorted(list(IMAGE_EXTENSIONS)),
+        "audio": sorted(list(AUDIO_EXTENSIONS)),
+        "video": sorted(list(VIDEO_EXTENSIONS)),
         "archive": sorted(list(ARCHIVE_EXTENSIONS)),
-        "limits": {"max_file_size": format_file_size(MAX_FILE_SIZE), "max_zip_size": format_file_size(MAX_ZIP_SIZE), "max_text_length": format_file_size(MAX_TEXT_LENGTH)}
+        "limits": {
+            "max_file_size": format_file_size(MAX_FILE_SIZE),
+            "max_zip_size": format_file_size(MAX_ZIP_SIZE),
+            "max_zip_entries": MAX_ZIP_ENTRIES,
+            "max_extracted_size": format_file_size(MAX_EXTRACTED_SIZE),
+            "max_text_length": format_file_size(MAX_TEXT_LENGTH)
+        }
     }
 
-@app.post("/analysis")
-async def analyze_file(request: Request, file: UploadFile = File(...), stream: bool = True):
-    """Enhanced file analysis supporting all file types including archives"""
-    user = await get_current_user_optional(request, Response())
-    content = await file.read()
-    filename = file.filename or "unknown"
-    file_size = len(content)
-    logger.info(f"[FILE] Upload: {filename} ({format_file_size(file_size)})")
-    if not content: raise HTTPException(400, "Empty file")
-    category = get_file_category(filename)
-    max_allowed = MAX_ZIP_SIZE if category == FileCategory.ARCHIVE else MAX_FILE_SIZE
-    if file_size > max_allowed:
-        raise HTTPException(400, f"File too large ({format_file_size(file_size)}). Max: {format_file_size(max_allowed)}")
-    if category == FileCategory.IMAGE:
-        if not OPENAI_API_KEY: raise HTTPException(500, "OpenAI Key required")
-        b64 = base64.b64encode(content).decode()
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": [{"type": "text", "text": "Analyze this image in detail."}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]}]})
-            return {"analysis": r.json()["choices"][0]["message"]["content"], "metadata": {"category": "image", "size": file_size}}
-    
-    result = await extract_file_content(content, filename)
-    
-    if category == FileCategory.ARCHIVE and result.files:
-        messages = [{"role": "system", "content": f"You are analyzing an archive. Archive info:\n- Entries: {result.metadata.get('entry_count')}\n- Extracted: {result.metadata.get('extracted_count')}\n\nProvide an overview of what this archive contains."}, {"role": "user", "content": result.content[:50000]}]
-    else:
-        file_context = f"\nFile: {filename}\nCategory: {result.metadata.get('category')}\nSize: {format_file_size(file_size)}\nLines: {result.metadata.get('line_count', 'N/A')}\n"
-        if result.metadata.get("language"): file_context += f"Language: {result.metadata['language']}\n"
-        messages = [{"role": "system", "content": f"You analyze files. Detect type and respond accordingly:\n- Code → explain, find bugs, suggest improvements\n- Documents → summarize + key insights\n- Data → extract patterns\nBe structured.{file_context}"}, {"role": "user", "content": result.content}]
-    
-    if stream:
-        async def gen():
-            try:
-                yield sse({"type": "file_metadata", "metadata": result.metadata, "files": result.files})
-                async with httpx.AsyncClient(timeout=None) as client:
-                    async with client.stream("POST", GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": messages, "stream": True, "max_tokens": 4096}) as resp:
-                        async for line in resp.aiter_lines():
-                            if line.startswith("data: ") and line != "data: [DONE]":
-                                try:
-                                    data = json.loads(line[6:])
-                                    content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                    if content: yield sse({"type": "token", "text": content})
-                                except: pass
-                yield sse({"type": "done"})
-            except Exception as e: yield sse({"type": "error", "message": str(e)})
-        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-    
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": messages, "max_tokens": 4096})
-        return {"analysis": r.json()["choices"][0]["message"]["content"], "metadata": result.metadata, "files": result.files, "truncated": result.truncated}
 
-@app.post("/ask/universal")
-async def ask_universal(request: Request, response: Response, current_user: dict = Depends(get_current_user_optional)):
-    try:
-        content_type = request.headers.get("content-type", "")
-        if "multipart/form-data" in content_type:
-            form = await request.form()
-            prompt = form.get("prompt", "").strip() if form.get("prompt") else ""
-            file = form.get("file")
-            
-            if file:
-                file_content = await file.read()
-                filename = file.filename or "unknown"
-                if file.content_type and file.content_type.startswith("image/"):
-                    if OPENAI_API_KEY:
-                        b64 = base64.b64encode(file_content).decode()
-                        async with httpx.AsyncClient(timeout=60) as client:
-                            r = await client.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": [{"type": "text", "text": prompt or "Analyze this image."}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]}]})
-                            return {"analysis": r.json()["choices"][0]["message"]["content"]}
-                
-                result = await extract_file_content(file_content, filename)
-                messages = [{"role": "system", "content": f"File: {filename}, Category: {result.metadata.get('category')}, Size: {format_file_size(len(file_content))}"}, {"role": "user", "content": (prompt + "\n" if prompt else "") + result.content}]
-                
-                async def gen():
-                    try:
-                        yield sse({"type": "file_metadata", "metadata": result.metadata})
-                        async with httpx.AsyncClient(timeout=None) as client:
-                            async with client.stream("POST", GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": messages, "stream": True, "max_tokens": 4096}) as resp:
-                                async for line in resp.aiter_lines():
-                                    if line.startswith("data: ") and line != "data: [DONE]":
-                                        try:
-                                            data = json.loads(line[6:])
-                                            content = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                            if content: yield sse({"type": "token", "text": content})
-                                        except: pass
-                        yield sse({"type": "done"})
-                    except Exception as e: yield sse({"type": "error", "message": str(e)})
-                return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-            
-        if not prompt: raise HTTPException(status_code=400, detail="prompt or file required")
-        
-        body = await request.json()
-        prompt = (body.get("prompt") or "").strip()
-        conversation_id = body.get("conversation_id")
-        files = body.get("files", [])
-        stream = body.get("stream", True)
-        
-        output_type = body.get("output_type")
-        language = body.get("language")
-        target_language = body.get("target_language")
-        voice = body.get("voice", "alloy")
-        enable_cot = body.get("enable_cot", False)
-        temperature = body.get("temperature", 0.7)
-        max_tokens = body.get("max_tokens", 4096)
-        system_prompt = body.get("system_prompt")
-        execute_code = body.get("execute_code", False)
-        context = body.get("context")
-        documents = body.get("documents", [])
-
-        if not prompt and not files and not documents:
-            raise HTTPException(status_code=400, detail="prompt, files, or documents required")
-
-        identity = current_user or {}
-        user_id = identity.get("id") or str(uuid.uuid4())
-        
-        if not conversation_id: conversation_id = str(uuid.uuid4())
-        await asyncio.to_thread(lambda: supabase.table("conversations").upsert({"id": conversation_id, "user_id": user_id, "created_at": datetime.utcnow().isoformat()}).execute())
-
-        history_res = await asyncio.to_thread(lambda: supabase.table("messages").select("role, content").eq("conversation_id", conversation_id).order("created_at").limit(20).execute())
-        history_messages = history_res.data or []
-
-        intent_result = detect_intent_advanced(prompt)
-        detected_intent = intent_result.legacy_intent if intent_result else "chat"
-        confidence = intent_result.confidence if intent_result else 0.0
-        logger.info(f"[INTENT] {detected_intent} ({confidence:.2%}) user={user_id[:8]}")
-        
-        if output_type == "code": detected_intent = "code_generation"
-        elif target_language: detected_intent = "translation"
-        elif enable_cot: detected_intent = "reasoning"
-        elif execute_code: detected_intent = "code_execution"
-        
-        if detected_intent == "joke": return await tell_joke("general")
-        elif detected_intent == "math_calculation":
-            async def math_gen():
-                try:
-                    yield sse({"type": "status", "status": "computing"})
-                    result = await solve_math(prompt)
-                    answer = result["answer"]
-                    for char in answer:
-                        yield sse({"type": "token", "text": char})
-                        await asyncio.sleep(0.01)
-                    yield sse({"type": "done"})
-                except Exception as e: yield sse({"type": "error", "message": str(e)})
-            return StreamingResponse(math_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-        
-        elif detected_intent in ("web_search", "research"):
-            query = re.sub(r"^(search for|look up|find|google|research)\s+", "", prompt.lower(), flags=re.IGNORECASE)
-            async def search_gen():
-                try:
-                    yield sse({"type": "status", "status": "searching"})
-                    results = await serper_search(query)
-                    yield sse({"type": "search_results", "results": results})
-                    yield sse({"type": "status", "status": "summarizing"})
-                    async with httpx.AsyncClient(timeout=60) as client:
-                        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Answer: {query}\nResults: {json.dumps(results)}"}], "max_tokens": 2048, "temperature": 0.3})
-                        summary = r.json()["choices"][0]["message"]["content"]
-                    for char in summary:
-                        yield sse({"type": "token", "text": char})
-                        await asyncio.sleep(0.01)
-                    yield sse({"type": "done"})
-                except Exception as e: yield sse({"type": "error", "message": str(e)})
-            return StreamingResponse(search_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-
-        elif detected_intent == "code_execution" and JUDGE0_KEY:
-            lang = language or detect_language(prompt)
-            async def exec_gen():
-                try:
-                    yield sse({"type": "status", "status": "generating"})
-                    async with httpx.AsyncClient(timeout=60) as client:
-                        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CODE_MODEL, "messages": [{"role": "system", "content": get_detector().get_code_system_prompt(prompt)}, {"role": "user", "content": f"Write executable {lang} code for: {prompt}"}], "max_tokens": max_tokens})
-                        code = r.json()["choices"][0]["message"]["content"]
-                    match = re.search(r"```(?:\w+)?\n(.*?)```", code, re.DOTALL)
-                    if match: code = match.group(1)
-                    yield sse({"type": "code", "language": lang, "code": code})
-                    yield sse({"type": "status", "status": "executing"})
-                    lang_id = JUDGE0_LANGUAGES.get(lang.lower(), 71)
-                    async with httpx.AsyncClient(timeout=30) as client:
-                        submit = await client.post(f"{JUDGE0_URL}/submissions", headers={"X-RapidAPI-Key": JUDGE0_KEY, "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com", "Content-Type": "application/json"}, json={"source_code": code, "language_id": lang_id, "stdin": ""})
-                        token = submit.json()["token"]
-                        for _ in range(15):
-                            await asyncio.sleep(1)
-                            result = await client.get(f"{JUDGE0_URL}/submissions/{token}", headers={"X-RapidAPI-Key": JUDGE0_KEY, "X-RapidAPI-Host": "judge0-ce.p.rapidapi.com"})
-                            if result.json().get("status", {}).get("id", 0) in [1, 2]: continue
-                            yield sse({"type": "execution", "exit_code": result.json().get("status", {}).get("id"), "output": result.json().get("stdout") or result.json().get("stderr", "No output")})
-                            break
-                    yield sse({"type": "done"})
-                except Exception as e: yield sse({"type": "error", "message": str(e)})
-            return StreamingResponse(exec_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-
-        elif detected_intent == "translation":
-            text_to_translate = prompt
-            for pattern in [r"translate.*?to\s+(\w+):\s*(.+)", r"in\s+(\w+):\s*(.+)", r"to\s+(\w+):\s*(.+)"]:
-                match = re.search(pattern, prompt, re.IGNORECASE)
-                if match: target_language, text_to_translate = match.group(1), match.group(2); break
-            async def trans_gen():
-                try:
-                    yield sse({"type": "status", "status": "translating"})
-                    async with httpx.AsyncClient(timeout=60) as client:
-                        r = await client.post(GROQ_URL, headers=get_groq_headers(), json={"model": CHAT_MODEL, "messages": [{"role": "user", "content": f"Translate to {target_language}:\n{text_to_translate}"}], "max_tokens": max_tokens, "temperature": 0.3})
-                        return {"original": text_to_translate, "translated": r.json()["choices"][0]["message"]["content"], "target_language": target_language}
-                except Exception as e: yield sse({"type": "error", "message": str(e)})
-            return StreamingResponse(trans_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-
-        elif detected_intent == "text_to_speech":
-            text = re.sub(r"[#*`\[\]]", "", prompt).strip()
-            text = re.sub(r"^(speak|say|read|narrate|pronounce)\s+(this|it|the|that)?\s*", "", text, flags=re.IGNORECASE)
-            if ELEVENLABS_API_KEY:
-                try:
-                    async with httpx.AsyncClient(timeout=60) as client:
-                        r = await client.post(f"https://api.elevenlabs.io/v1/text-to-speech/{get_elevenlabs_voice_id(voice)}", headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}, json={"text": text, "model_id": "eleven_multilingual_v2"})
-                        return {"audio": base64.b64encode(r.content).decode(), "provider": "elevenlabs"}
-                except: pass
-            if OPENAI_API_KEY:
-                async with httpx.AsyncClient(timeout=60) as client:
-                    r = await client.post("https://api.openai.com/v1/audio/speech", headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, json={"model": "tts-1", "voice": voice, "input": text})
-                    return {"audio": base64.b64encode(r.content).decode(), "provider": "openai"}
-            raise HTTPException(500, "No TTS provider")
-
-        # DEFAULT CHAT STREAM
-        async def chat_gen():
-            full_reply = ""
-            try:
-                yield sse({"type": "status", "status": "thinking"})
-                messages = []
-                base_system = system_prompt or "You are HeloXAI, an advanced AI assistant. Be helpful, accurate, and concise."
-                user_memory_str = await fetch_user_memory(user_id)
-                if user_memory_str: base_system += f"\n\n{user_memory_str}\n\nUse this context to personalize if relevant."
-                messages.append({"role": "system", "content": base_system})
-                if context: messages.append({"role": "system", "content": f"Context: {context}"})
-                if documents:
-                    doc_texts = [await extract_document_text(d) for d in documents]
-                    messages.append({"role": "system", "content": f"Documents:\n{chr(10).join(doc_texts)}"})
-                messages.extend(history_messages)
-                messages.append({"role": "user", "content": prompt})
-                
-                reply = await chat_with_tools(user_id, messages)
-                full_reply = reply
-                for char in reply:
-                    yield sse({"type": "token", "text": char})
-                    await asyncio.sleep(0.008)
-                
-                await asyncio.to_thread(lambda: supabase.table("messages").insert({"id": str(uuid.uuid4()), "conversation_id": conversation_id, "user_id": user_id, "role": "assistant", "content": reply, "created_at": datetime.utcnow().isoformat()}).execute())
-                yield sse({"type": "done"})
-            except Exception as e:
-                logger.error(f"Chat failed: {e}")
-                yield sse({"type": "error", "message": str(e)})
-        
-        return StreamingResponse(chat_gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
-
-    except HTTPException: raise
-    except Exception as e:
-        logger.error(f"/ask/universal failed: {e}")
-        raise HTTPException(500, str(e))
-
-# ---------- TTS/STT ----------
-@app.post("/tts")
-async def text_to_speech(request: Request, current_user: dict = Depends(get_current_user_optional)):
-    body = await request.json()
-    text = re.sub(r"[#*`\[\]]", "", body.get("text", "").strip())
-    voice = body.get("voice", "alloy")
-    if not text: raise HTTPException(400, "Text required")
-    if ELEVENLABS_API_KEY:
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.post(f"https://api.elevenlabs.io/v1/text-to-speech/{get_elevenlabs_voice_id(voice)}", headers={"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}, json={"text": text, "model_id": "eleven_multilingual_v2"})
-                return {"audio": base64.b64encode(r.content).decode(), "provider": "elevenlabs"}
-        except: pass
-    if OPENAI_API_KEY:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post("https://api.openai.com/v1/audio/speech", headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, json={"model": "tts-1", "voice": voice, "input": text})
-            return {"audio": base64.b64encode(r.content).decode(), "provider": "openai"}
-    raise HTTPException(500, "No TTS provider")
-
-@app.post("/stt")
-async def speech_to_text(request: Request, current_user: dict = Depends(get_current_user_optional)):
-    content_type = request.headers.get("content-type", "")
-    if "multipart/form-data" in content_type:
-        form = await request.form()
-        audio_file = form.get("audio") or form.get("file")
-        if not audio_file: raise HTTPException(400, "No audio file")
-        audio_bytes = await audio_file.read()
-    else:
-        body = await request.json()
-        audio_b64 = body.get("audio") or body.get("data")
-        if not audio_b64: raise HTTPException(400, "No audio data")
-        if "," in audio_b64: audio_b64 = audio_b64.split(",", 1)[1]
-        audio_bytes = base64.b64decode(audio_b64)
-    
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(audio_bytes)
-        temp_path = tmp.name
-    try:
-        if OPENAI_API_KEY:
-            async with httpx.AsyncClient(timeout=120) as client:
-                with open(temp_path, "rb") as f:
-                    r = await client.post("https://api.openai.com/v1/audio/transcriptions", headers={"Authorization": f"Bearer {OPENAI_API_KEY}"}, files={"file": ("audio.wav", f)}, data={"model": "whisper-1"})
-                    return {"text": r.json()["text"], "provider": "openai"}
-        raise HTTPException(500, "No STT provider")
-    finally:
-        if os.path.exists(temp_path): os.unlink(temp_path)
-
-@app.get("/tts/voices")
-async def get_tts_voices():
-    return {"voices": {"openai": ["alloy", "echo", "fable", "onyx", "nova", "shimmer"], "elevenlabs": ["rachel", "drew", "bella", "antoni", "josh", "grace"]}, "providers": {"openai": bool(OPENAI_API_KEY), "elevenlabs": bool(ELEVENLABS_API_KEY)}}
-
-# ---------- Session Management ----------
+# =========================
+# SESSION MANAGEMENT ENDPOINTS
+# =========================
 @app.post("/session/validate")
-async def validate_session(current_user: dict = Depends(get_current_user_optional)):
-    return {"valid": current_user.get("session_valid", False), "user_id": current_user.get("id")}
+async def validate_session(req: Request, res: Response):
+    """Validate current session and return user info"""
+    user = await get_user(req, res)
+    return {
+        "valid": user.get("session_valid", False),
+        "user_id": user["id"],
+        "fingerprint": user.get("fingerprint", "")[:8] + "...",
+        "is_authenticated": bool(user.get("email") and not user["email"].startswith("anon+"))
+    }
+
+
+@app.post("/session/refresh")
+async def refresh_session(req: Request, res: Response):
+    """Manually refresh the current session"""
+    body = await req.json() if req.headers.get("content-type") == "application/json" else {}
+    remember = body.get("remember", True)
+    
+    user = await get_user(req, res, remember=remember)
+    
+    # Force session refresh
+    new_token = await create_user_session(
+        user["id"],
+        user.get("fingerprint", ""),
+        remember
+    )
+    
+    set_session_cookies(res, user["id"], user.get("fingerprint", ""), new_token, remember)
+    
+    return {
+        "status": "refreshed",
+        "user_id": user["id"],
+        "expires_in": SESSION_DURATION if remember else 24 * 60 * 60
+    }
+
 
 @app.post("/session/logout")
-async def logout(request: Request, response: Response, current_user: dict = Depends(get_current_user_optional)):
-    user_id = current_user.get("id")
+async def logout(req: Request, res: Response):
+    """Logout and clear all session data"""
+    user_id = req.cookies.get(PRIMARY_COOKIE)
+    
     if user_id:
         try:
-            await asyncio.to_thread(lambda: supabase.table("user_sessions").update({"is_valid": False}).eq("user_id", user_id).execute())
-        except: pass
-        if user_id in _session_cache: del _session_cache[user_id]
-    clear_session_cookies(response)
+            # Invalidate all sessions for this user
+            await _execute_supabase_with_retry(
+                supabase.table("user_sessions")
+                .update({"is_valid": False})
+                .eq("user_id", user_id),
+                description="Invalidate User Sessions"
+            )
+        except Exception as e:
+            logger.error(f"Failed to invalidate sessions: {e}")
+        
+        # Clear cache
+        if user_id in _session_cache:
+            del _session_cache[user_id]
+    
+    clear_session_cookies(res)
+    
     return {"status": "logged_out"}
 
-@app.post("/stop")
-async def stop_generation(request: Request):
-    body = await request.json()
-    stream_id = body.get("stream_id")
-    if stream_id:
-        await stop_stream(stream_id)
-        return {"status": "stopped"}
-    async with active_stream_lock:
-        for event in active_streams.values(): event.set()
-        stopped = len(active_streams)
-        active_streams.clear()
-    return {"status": "stopped", "streams_stopped": stopped}
 
+# =========================
+# SPECIALIZED HANDLERS
+# =========================
+async def handle_math_request(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
+    system_prompt = get_system_prompt(prompt) + """
+
+You are also a mathematical expert. When solving math problems:
+1. Show your work step-by-step
+2. Explain each step clearly
+3. Use proper mathematical notation
+4. Verify your answer
+5. If it's a proof, be rigorous
+
+Format complex equations clearly using LaTeX-style notation where appropriate."""
+
+    user_memory = user.get("memory", "")
+    if user_memory:
+        system_prompt += f"\n\nUser Context: {user_memory}"
+
+    history = await get_history(conv_id) if conv_id else []
+    messages = [{"role": "system", "content": system_prompt}] + history
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            active_streams[user["id"]] = task
+            try:
+                full_text = ""
+                async for token in stream_groq_chat(messages):
+                    if task.cancelled():
+                        break
+                    full_text += token
+                    yield sse({"type": "token", "text": token})
+                
+                # MEMORY UPDATE
+                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
+                asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+                try:
+                    await save_message(user["id"], conv_id, "assistant", full_text)
+                except Exception as e:
+                    logger.error(f"Failed to save assistant message: {e}")
+
+                yield sse({"type": "done"})
+            
+            except Exception as e:
+                logger.error(f"Math Stream Error: {e}")
+                yield sse({"type": "error", "message": "An error occurred."})
+            
+            finally:
+                active_streams.pop(user["id"], None)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=get_groq_headers(),
+            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
+        )
+        r.raise_for_status()
+        reply = r.json()["choices"][0]["message"]["content"]
+
+    # MEMORY UPDATE
+    new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
+    asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+    await save_message(user["id"], conv_id, "assistant", reply)
+    return {"reply": reply}
+
+
+async def handle_research_request(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
+    system_prompt = get_system_prompt(prompt) + """
+
+You are also a research assistant. When helping with research:
+1. Provide well-structured, factual information
+2. Cite sources when possible (even if general)
+3. Present multiple perspectives on controversial topics
+4. Identify gaps in current knowledge
+5. Suggest further areas of investigation
+Be thorough but concise."""
+
+    user_memory = user.get("memory", "")
+    if user_memory:
+        system_prompt += f"\n\nUser Context: {user_memory}"
+
+    history = await get_history(conv_id) if conv_id else []
+    messages = [{"role": "system", "content": system_prompt}] + history
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            active_streams[user["id"]] = task
+            try:
+                full_text = ""
+                async for token in stream_groq_chat(messages, max_tokens=2048):
+                    if task.cancelled():
+                        break
+                    full_text += token
+                    yield sse({"type": "token", "text": token})
+                
+                # MEMORY UPDATE
+                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
+                asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+                try:
+                    await save_message(user["id"], conv_id, "assistant", full_text)
+                except Exception as e:
+                    logger.error(f"Failed to save assistant message: {e}")
+
+                yield sse({"type": "done"})
+            
+            except Exception as e:
+                logger.error(f"Research Stream Error: {e}")
+                yield sse({"type": "error", "message": "An error occurred."})
+            
+            finally:
+                active_streams.pop(user["id"], None)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=get_groq_headers(),
+            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
+        )
+        r.raise_for_status()
+        reply = r.json()["choices"][0]["message"]["content"]
+
+    # MEMORY UPDATE
+    new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
+    asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+    await save_message(user["id"], conv_id, "assistant", reply)
+    return {"reply": reply}
+
+
+async def handle_creative_request(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
+    system_prompt = get_system_prompt(prompt) + """
+
+You are also a creative writing expert. When writing creative content:
+1. Use vivid, engaging language
+2. Create compelling characters and narratives
+3. Pay attention to rhythm and flow
+4. Match the requested style or genre
+5. Be original and imaginative
+Adapt your style to the specific creative request."""
+
+    user_memory = user.get("memory", "")
+    if user_memory:
+        system_prompt += f"\n\nUser Context: {user_memory}"
+
+    history = await get_history(conv_id) if conv_id else []
+    messages = [{"role": "system", "content": system_prompt}] + history
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            active_streams[user["id"]] = task
+            try:
+                full_text = ""
+                async for token in stream_groq_chat(messages, max_tokens=2048):
+                    if task.cancelled():
+                        break
+                    full_text += token
+                    yield sse({"type": "token", "text": token})
+                
+                # MEMORY UPDATE
+                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
+                asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+                try:
+                    await save_message(user["id"], conv_id, "assistant", full_text)
+                except Exception as e:
+                    logger.error(f"Failed to save assistant message: {e}")
+
+                yield sse({"type": "done"})
+            
+            except Exception as e:
+                logger.error(f"Creative Stream Error: {e}")
+                yield sse({"type": "error", "message": "An error occurred."})
+            
+            finally:
+                active_streams.pop(user["id"], None)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=get_groq_headers(),
+            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
+        )
+        r.raise_for_status()
+        reply = r.json()["choices"][0]["message"]["content"]
+
+    # MEMORY UPDATE
+    new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
+    asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+    await save_message(user["id"], conv_id, "assistant", reply)
+    return {"reply": reply}
+
+
+async def handle_translation_request(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
+    system_prompt = get_system_prompt(prompt) + """
+
+You are also a professional translator. When translating:
+1. Preserve the meaning and tone of the original
+2. Use natural, idiomatic language in the target
+3. Handle cultural nuances appropriately
+4. Maintain formatting where possible
+5. If unsure about context, provide alternatives
+Always indicate the source and target languages."""
+
+    user_memory = user.get("memory", "")
+    if user_memory:
+        system_prompt += f"\n\nUser Context: {user_memory}"
+
+    history = await get_history(conv_id) if conv_id else []
+    messages = [{"role": "system", "content": system_prompt}] + history
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            active_streams[user["id"]] = task
+            try:
+                full_text = ""
+                async for token in stream_groq_chat(messages):
+                    if task.cancelled():
+                        break
+                    full_text += token
+                    yield sse({"type": "token", "text": token})
+                
+                # MEMORY UPDATE
+                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
+                asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+                try:
+                    await save_message(user["id"], conv_id, "assistant", full_text)
+                except Exception as e:
+                    logger.error(f"Failed to save assistant message: {e}")
+
+                yield sse({"type": "done"})
+            
+            except Exception as e:
+                logger.error(f"Translation Stream Error: {e}")
+                yield sse({"type": "error", "message": "An error occurred."})
+            
+            finally:
+                active_streams.pop(user["id"], None)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=get_groq_headers(),
+            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
+        )
+        r.raise_for_status()
+        reply = r.json()["choices"][0]["message"]["content"]
+
+    # MEMORY UPDATE
+    new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
+    asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+    await save_message(user["id"], conv_id, "assistant", reply)
+    return {"reply": reply}
+
+
+async def handle_summary_request(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
+    system_prompt = get_system_prompt(prompt) + """
+
+You are also a summarization expert. When summarizing:
+1. Extract the most important points
+2. Maintain accuracy - don't add information
+3. Be concise but complete
+4. Use bullet points for clarity when appropriate
+5. Start with a brief overview, then key points
+Tailor the summary length to the complexity of the content."""
+
+    user_memory = user.get("memory", "")
+    if user_memory:
+        system_prompt += f"\n\nUser Context: {user_memory}"
+
+    history = await get_history(conv_id) if conv_id else []
+    messages = [{"role": "system", "content": system_prompt}] + history
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            active_streams[user["id"]] = task
+            try:
+                full_text = ""
+                async for token in stream_groq_chat(messages):
+                    if task.cancelled():
+                        break
+                    full_text += token
+                    yield sse({"type": "token", "text": token})
+                
+                # MEMORY UPDATE
+                new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
+                asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+                try:
+                    await save_message(user["id"], conv_id, "assistant", full_text)
+                except Exception as e:
+                    logger.error(f"Failed to save assistant message: {e}")
+
+                yield sse({"type": "done"})
+            
+            except Exception as e:
+                logger.error(f"Summary Stream Error: {e}")
+                yield sse({"type": "error", "message": "An error occurred."})
+            
+            finally:
+                active_streams.pop(user["id"], None)
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=get_groq_headers(),
+            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
+        )
+        r.raise_for_status()
+        reply = r.json()["choices"][0]["message"]["content"]
+
+    # MEMORY UPDATE
+    new_memory = (user_memory + "\n" + reply[-500:]) if user_memory else reply[-1000:]
+    asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+    await save_message(user["id"], conv_id, "assistant", reply)
+    return {"reply": reply}
+
+
+# =========================
+# CHAT MANAGEMENT ENDPOINTS
+# =========================
 @app.post("/newchat")
-async def create_new_chat(request: Request, response: Response, current_user: dict = Depends(get_current_user_optional)):
-    user_id = (current_user or {}).get("id") or str(uuid.uuid4())
-    new_id = str(uuid.uuid4())
-    await asyncio.to_thread(lambda: supabase.table("conversations").insert({"id": new_id, "user_id": user_id, "created_at": datetime.utcnow().isoformat()}).execute())
-    return {"conversation_id": new_id, "user_id": user_id}
+async def new_chat(req: Request, res: Response):
+    user = await get_user(req, res)
+    cid = str(uuid.uuid4())
+    await _execute_supabase_with_retry(
+        supabase.table("conversations").insert({
+            "id": cid, "user_id": user["id"],
+            "title": "New Chat", "created_at": datetime.now(timezone.utc).isoformat()
+        }),
+        description="New Chat"
+    )
+    return {"conversation_id": cid}
 
-@app.delete("/chat/{conversation_id}")
-async def delete_chat(conversation_id: str, request: Request, current_user: dict = Depends(get_current_user_optional)):
-    user_id = (current_user or {}).get("id")
-    if not user_id: raise HTTPException(401, "Auth required")
-    await asyncio.to_thread(lambda: supabase.table("messages").delete().eq("conversation_id", conversation_id).eq("user_id", user_id).execute())
-    await asyncio.to_thread(lambda: supabase.table("conversations").delete().eq("id", conversation_id).eq("user_id", user_id).execute())
-    return {"status": "deleted"}
+
+@app.post("/stop")
+async def stop_generation(req: Request, res: Response):
+    user = await get_user(req, res)
+    user_id = user["id"]
+
+    task = active_streams.get(user_id)
+    if task and not task.done():
+        task.cancel()
+        active_streams.pop(user_id, None)
+        return {"status": "stopped"}
+    return {"status": "no_active_stream"}
+
+
+@app.post("/regenerate")
+async def regenerate(req: Request, res: Response):
+    body = await req.json()
+    conv_id = body.get("conversation_id")
+
+    user = await get_user(req, res)
+    user_id = user["id"]
+
+    if not conv_id:
+        raise HTTPException(400, "conversation_id required")
+
+    msgs = await _execute_supabase_with_retry(
+        supabase.table("messages")
+        .select("*")
+        .eq("conversation_id", conv_id)
+        .order("created_at", desc=True)
+        .limit(10),
+        description="Regenerate History Lookup"
+    )
+
+    if not msgs.data:
+        raise HTTPException(404, "No messages found")
+
+    last_user_msg = None
+    for m in msgs.data:
+        if m["role"] == "user":
+            last_user_msg = m
+            break
+
+    if not last_user_msg:
+        raise HTTPException(400, "No user message to regenerate from")
+
+    await _execute_supabase_with_retry(
+        supabase.table("messages")
+        .delete()
+        .gt("created_at", last_user_msg["created_at"])
+        .eq("role", "assistant")
+        .eq("conversation_id", conv_id),
+        description="Delete Old Assistant Message"
+    )
+
+    async def event_gen():
+        task = asyncio.current_task()
+        active_streams[user_id] = task
+        try:
+            history = await get_history(conv_id)
+            
+            last_prompt = last_user_msg.get("content", "")
+            base_system = get_system_prompt(last_prompt)
+            user_memory = user.get("memory", "")
+            if user_memory:
+                base_system += f"\n\nUser Context: {user_memory}"
+            full_history = [{"role": "system", "content": base_system}] + history
+            
+            full_text = ""
+            async for token in stream_groq_chat(full_history):
+                if task and task.cancelled():
+                    break
+                full_text += token
+                yield sse({"type": "token", "text": token})
+
+            # MEMORY UPDATE
+            new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
+            asyncio.create_task(update_user_memory(user["id"], new_memory))
+
+            try:
+                await save_message(user_id, conv_id, "assistant", full_text)
+            except Exception as e:
+                logger.error(f"Failed to save assistant message: {e}")
+
+            yield sse({"type": "done"})
+        
+        except Exception as e:
+            logger.error(f"Regenerate Stream Error: {e}")
+            yield sse({"type": "error", "message": "An error occurred."})
+        
+        finally:
+            active_streams.pop(user_id, None)
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
 
 @app.get("/chats")
-async def list_chats(request: Request, current_user: dict = Depends(get_current_user_optional)):
-    user_id = (current_user or {}).get("id")
-    if not user_id: return {"chats": [], "total": 0}
-    conv_res = await asyncio.to_thread(lambda: supabase.table("conversations").select("id, title, created_at, updated_at").eq("user_id", user_id).order("updated_at", desc=True).range(0, 50).execute())
-    return {"chats": conv_res.data or [], "total": len(conv_res.data or [])}
+async def list_chats(req: Request, res: Response):
+    user = await get_user(req, res)
+    
+    result = await _execute_supabase_with_retry(
+        supabase.table("conversations")
+        .select("*")
+        .eq("user_id", user["id"])
+        .order("updated_at", desc=True),
+        description="List Chats"
+    )
+    return {"chats": result.data or []}
 
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
-@app.get("/info")
-async def info():
-    return {"creator": CREATOR_INFO, "models": {"chat": CHAT_MODEL, "code": CODE_MODEL}, "providers": {"groq": bool(GROQ_API_KEY), "openai": bool(OPENAI_API_KEY), "elevenlabs": bool(ELEVENLABS_API_KEY), "judge0": bool(JUDGE0_KEY), "serper": bool(SERPER_API_KEY), "runway": bool(RUNWAYML_API_KEY)}, "features": ["streaming", "file_analysis", "archives", "code_execution", "web_search", "tts", "stt", "user_memory", "session_persistence"]}
+# =========================
+# USER IDENTITY ENDPOINT
+# =========================
+@app.get("/user/info")
+async def get_user_info(req: Request, res: Response):
+    user = await get_user(req, res)
+    return {
+        "user_id": user["id"],
+        "fingerprint": user.get("fingerprint", "")[:8] + "...",
+        "is_identified": True,
+        "session_valid": user.get("session_valid", False),
+        "is_authenticated": bool(user.get("email") and not user["email"].startswith("anon+"))
+    }
 
+
+@app.post("/user/merge")
+async def merge_user(req: Request, res: Response):
+    body = await req.json()
+    target_id = body.get("target_user_id")
+    
+    user = await get_user(req, res)
+    
+    if not target_id or target_id == user["id"]:
+        return {"status": "no_merge_needed"}
+    
+    try:
+        await _execute_supabase_with_retry(
+            supabase.table("conversations")
+            .update({"user_id": target_id})
+            .eq("user_id", user["id"]),
+            description="Merge Conversations"
+        )
+        
+        await _execute_supabase_with_retry(
+            supabase.table("messages")
+            .update({"user_id": target_id})
+            .eq("user_id", user["id"]),
+            description="Merge Messages"
+        )
+        
+        fingerprint = user.get("fingerprint", "")
+        session_token = await create_user_session(target_id, fingerprint, True)
+        set_session_cookies(res, target_id, fingerprint, session_token, True)
+        
+        return {"status": "merged", "new_user_id": target_id}
+    
+    except Exception as e:
+        logger.error(f"User merge failed: {e}")
+        raise HTTPException(500, "Failed to merge user data")
+
+
+# =========================
+# INTENT ANALYSIS ENDPOINT
+# =========================
+@app.post("/analyze-intent")
+async def analyze_intent_endpoint(req: Request):
+    body = await req.json()
+    prompt = body.get("prompt", "")
+
+    if not prompt:
+        raise HTTPException(400, "Prompt required")
+
+    intent_result = detect_intent(prompt)
+    action_type = get_action_type(prompt)
+    required_tools = get_required_tools(prompt)
+
+    return {
+        "intent": intent_result.to_dict() if intent_result else None,
+        "action_type": action_type,
+        "required_tools": required_tools,
+        "confidence": intent_result.confidence if intent_result else 0.0
+    }
+
+
+# =========================
+# MEDIA ENDPOINTS (ELEVENLABS UPGRADE)
+# =========================
+
+@app.post("/tts")
+async def text_to_speech(req: Request):
+    data = await req.json()
+    text = data.get("text")
+    voice_id = data.get("voice", "21m00Tcm4TlvDq8ikWAM") # Default: Rachel
+
+    if not text:
+        raise HTTPException(400, "text required")
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(500, "ElevenLabs API Key missing")
+
+    # ElevenLabs Voice Mapping for compatibility
+    # Maps the "generic" voice names used in the original code to specific ElevenLabs IDs if needed
+    # Or just pass the ID directly. 
+    # Using ElevenLabs Multilingual v2 model for high quality.
+    
+    async with httpx.AsyncClient(timeout=60) as client:
+        try:
+            # Endpoint for Text-to-Speech
+            url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+            
+            headers = {
+                "xi-api-key": ELEVENLABS_API_KEY,
+                "Content-Type": "application/json"
+            }
+
+            payload = {
+                "text": text,
+                "model_id": "eleven_multilingual_v2",
+                "voice_settings": {
+                    "stability": 0.5,
+                    "similarity_boost": 0.75
+                }
+            }
+            
+            r = await client.post(url, headers=headers, json=payload)
+            r.raise_for_status()
+            
+            return Response(content=r.content, media_type="audio/mpeg")
+            
+        except httpx.HTTPStatusError as e:
+            logger.error(f"ElevenLabs TTS error: {e.response.status_code} - {e.response.text}")
+            return JSONResponse(
+                status_code=e.response.status_code,
+                content={"error": e.response.text}
+            )
+
+@app.get("/tts/voices")
+async def get_voices():
+    # Returns a curated list of ElevenLabs voices compatible with the client
+    return {
+        "voices": [
+            {"id": "21m00Tcm4TlvDq8ikWAM", "name": "Rachel"},
+            {"id": "AZnzlk1XvdvUeBnXmlld", "name": "Domi"},
+            {"id": "EXAVITQu4vr4xnSDxMaL", "name": "Bella"},
+            {"id": "ErXwobaRiVQHn1TqBp", "name": "Antoni"},
+            {"id": "MF3mGyEgrClXGD7RHPK", "name": "Elli"},
+            {"id": "TxGEqnHWrfWFTfGW9NG", "name": "Josh"},
+            {"id": "VR6AewLTigWG4XSOZ9p", "name": "Arnold"},
+            {"id": "pNInz6obpgDQGzWfYDT", "name": "Adam"},
+            {"id": "yoZ06aMxZKG28L3CgAI", "name": "Sam"}
+        ]
+    }
+
+
+@app.post("/stt")
+async def speech_to_text(file: UploadFile = File(...)):
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(500, "ElevenLabs API Key missing")
+
+    content = await file.read()
+    
+    async with httpx.AsyncClient(timeout=120) as client:
+        try:
+            # ElevenLabs STT Endpoint
+            url = "https://api.elevenlabs.io/v1/speech-to-text"
+            
+            headers = {
+                "xi-api-key": ELEVENLABS_API_KEY
+            }
+            
+            # ElevenLabs expects the file in 'file' and model id
+            data = {
+                "model_id": "eleven_multilingual_v2"
+            }
+            
+            files = {"file": (file.filename, content, file.content_type)}
+            
+            r = await client.post(url, headers=headers, data=data, files=files)
+            r.raise_for_status()
+            
+            return r.json()
+            
+        except httpx.HTTPStatusError as e:
+            logger.error(f"ElevenLabs STT error: {e.response.status_code} - {e.response.text}")
+            return JSONResponse(
+                status_code=e.response.status_code,
+                content={"error": e.response.text}
+            )
+
+
+# =========================
+# MEDIA GENERATION HANDLERS
+# =========================
+async def handle_image_generation(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool, style: str = None, size: str = "1024x1024", num_images: int =1):
+    MAX_PROMPT_LEN = 4000 
+    if not OPENAI_API_KEY:
+        msg = "No API Key"
+        async def err_gen():
+            yield sse({"type": "error", "message": msg})
+        if stream: return StreamingResponse(err_gen(), media_type="text/event-stream")
+        return {"error": msg}
+    
+    if not prompt or not prompt.strip(): 
+        raise HTTPException(400, "Prompt is required")
+    
+    if len(prompt) > MAX_PROMPT_LEN: 
+        prompt = prompt[:MAX_PROMPT_LEN]
+    
+    num_images =1
+    
+    STYLES = {
+        "realistic": "ultra realistic, 4k, highly detailed", 
+        "cartoon": "cartoon style, vibrant colors", 
+        "anime": "anime style", 
+        "cinematic": "cinematic lighting", 
+        "cyberpunk": "cyberpunk, neon"
+    }
+    
+    if style in STYLES: 
+        prompt = f"{prompt}, {STYLES[style]}"
+    
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                "https://api.openai.com/v1/images/generations", 
+                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}, 
+                json={"model": "dall-e-3", "prompt": prompt, "size": size, "n": num_images}
+            )
+            r.raise_for_status()
+            data = r.json()
+            
+    except httpx.HTTPStatusError as e:
+        # Parse the JSON response to get the specific error message
+        user_facing_msg = "Image generation failed. Please try a different prompt."
+        
+        try:
+            error_json = e.response.json()
+            # Extract specific "message" field from OpenAI's error structure
+            # Structure: { "error": { "message": "...", "code": "..." } }
+            if "error" in error_json and "message" in error_json["error"]:
+                user_facing_msg = error_json["error"]["message"]
+            else:
+                user_facing_msg = e.response.text
+        except Exception:
+            # Fallback if JSON parsing fails
+            user_facing_msg = f"Service error ({e.response.status_code})."
+            
+        logger.error(f"Image gen HTTP error {e.response.status_code}: {user_facing_msg}")
+        
+        async def err_gen():
+            yield sse({"type": "error", "message": user_facing_msg})
+        
+        if stream: return StreamingResponse(err_gen(), media_type="text/event-stream")
+        return {"error": user_facing_msg}
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"Image gen unexpected error: {error_msg}")
+        async def err_gen():
+            yield sse({"type": "error", "message": "An unexpected error occurred."})
+        if stream: return StreamingResponse(err_gen(), media_type="text/event-stream")
+        return {"error": error_msg}
+    
+    # Process successful response
+    images = []
+    try:
+        for item in data.get("data", []):
+            b64 = item.get("b64_json")
+            url = item.get("url")
+            if url: 
+                images.append({"url": url})
+            elif b64:
+                img_bytes = base64.b64decode(b64)
+                try:
+                    fname = f"{uuid.uuid4().hex}.png"
+                    path = f"public/{fname}"
+                    await asyncio.to_thread(
+                        lambda: supabase.storage.from_("ai-images").upload(path, img_bytes, {"content-type": "image/png"})
+                    )
+                    url = f"{SUPABASE_URL}/storage/v1/object/public/ai-images/{path}"
+                    images.append({"url": url})
+                except Exception as upload_err:
+                    logger.error(f"Failed to upload image to storage: {upload_err}")
+                    images.append({"url": f"data:image/png;base64,{b64}"})
+    except Exception as e:
+        logger.error(f"Failed to parse image response: {e}")
+        msg = "Failed to process generated image."
+        async def err_gen():
+            yield sse({"type": "error", "message": msg})
+        if stream: return StreamingResponse(err_gen(), media_type="text/event-stream")
+        return {"error": msg}
+    
+    if stream:
+        async def event_gen():
+            yield sse({"type": "images", "images": images})
+            yield sse({"type": "done"})
+        return StreamingResponse(event_gen(), media_type="text/event-stream")
+    
+    return {"images": images}
+    
+async def handle_video_generation(prompt: str, user: Dict[str, Any], conv_id: str, stream: bool):
+    """
+    Updated video handler with Model Routing.
+    Routes to Luma for Realistic, Pika for Anime/Cartoon.
+    """
+    
+    # 1. Detect Style
+    # Simple keyword check or use your existing intent detector
+    # (Assuming you might update IntentDetector to detect 'anime' vs 'realistic')
+    prompt_lower = prompt.lower()
+    is_anime = any(k in prompt_lower for k in ['anime', 'manga', 'cartoon', '2d animation', 'studio ghibli'])
+    
+    # 2. Select Model based on intent
+    if is_anime:
+        # Use Pika for Anime/Cartoon styles
+        MODEL_VERSION = "pika-labs/pika-1.0" 
+        model_name = "Pika"
+    else:
+        # Use Luma Dream Machine for Realistic/Cinematic/General
+        MODEL_VERSION = "luma-dream-machine"
+        model_name = "Luma"
+
+    headers = {"Authorization": f"Token {REPLICATE_API_TOKEN}", "Content-Type": "application/json"}
+    
+    async def gen():
+        try:
+            yield sse({"type": "status", "message": f"Initializing {model_name} AI..."})
+            
+            async with httpx.AsyncClient(timeout=300) as client:
+                # NOTE: Inputs differ slightly between models. 
+                # Luma usually takes: prompt, loop, aspect_ratio.
+                # Pika takes: prompt, frame_rate, motion_bucket_id.
+                
+                input_payload = {"prompt": prompt}
+                
+                if model_name == "Luma":
+                    input_payload["loop"] = False
+                    # Luma supports specific aspect ratios like "16:9", "9:16"
+                    if "vertical" in prompt_lower or "portrait" in prompt_lower or "phone" in prompt_lower:
+                        input_payload["aspect_ratio"] = "9:16"
+                    else:
+                        input_payload["aspect_ratio"] = "16:9"
+                
+                elif model_name == "Pika":
+                    # Pika specific settings
+                    input_payload["frame_rate"] = 24
+                    # Higher motion_bucket_id = more movement (0-255)
+                    input_payload["motion_bucket_id"] = 150 
+                
+                r = await client.post(
+                    "https://api.replicate.com/v1/predictions", 
+                    headers=headers, 
+                    json={"version": MODEL_VERSION, "input": input_payload}
+                )
+                
+                if r.status_code == 402:
+                     logger.error(f"Video gen billing error (402): Insufficient credits.")
+                     yield sse({"type": "error", "message": "Video generation requires paid credits on Replicate."})
+                     return
+
+                r.raise_for_status()
+                prediction = r.json()
+                prediction_id = prediction["id"]
+                
+                yield sse({"type": "status", "message": f"Generating video ({model_name})..."})
+                
+                poll_count = 0
+                while poll_count < 180: # Luma can take longer, 6 mins max
+                    r = await client.get(f"https://api.replicate.com/v1/predictions/{prediction_id}", headers=headers)
+                    r.raise_for_status()
+                    data = r.json()
+                    
+                    if data["status"] == "succeeded":
+                        raw_video_url = data["output"]
+                        
+                        # Handle list outputs (some models return a list)
+                        if isinstance(raw_video_url, list):
+                            raw_video_url = raw_video_url[0]
+                            
+                        yield sse({"type": "status", "message": "Applying watermark..."})
+                        
+                        # Only watermark if user is not premium (optional logic)
+                        watermarked_url = await add_watermark_to_video(raw_video_url)
+                        
+                        yield sse({"type": "video", "url": watermarked_url})
+                        yield sse({"type": "done"})
+                        return
+                    
+                    elif data["status"] == "failed":
+                        error_detail = data.get('error', 'Unknown error')
+                        logger.error(f"{model_name} prediction failed: {error_detail}")
+                        yield sse({"type": "error", "message": f"Video generation failed: {error_detail}"})
+                        return
+                    
+                    poll_count +=1
+                    await asyncio.sleep(2)
+                
+                yield sse({"type": "error", "message": "Video generation timed out."})
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Video gen HTTP error: {e.response.status_code} - {e.response.text}")
+            yield sse({"type": "error", "message": f"Service error: {e.response.status_code}"})
+        except Exception as e:
+            logger.error(f"Video gen unexpected error: {e}", exc_info=True)
+            yield sse({"type": "error", "message": str(e)})
+    
+    return StreamingResponse(gen(), media_type="text/event-stream")
+    
+# =========================
+# DATABASE MIGRATION HELPER
+# =========================
 @app.get("/setup/sessions-table")
 async def setup_sessions_table():
-    return {"sql": """
-CREATE TABLE IF NOT EXISTS user_sessions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    token TEXT NOT NULL,
-    fingerprint TEXT,
-    user_agent TEXT,
-    ip_address TEXT,
-    expires_at TIMESTAMPTZ NOT NULL,
-    is_valid BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions(user_id, token);
-CREATE INDEX IF NOT EXISTS idx_user_sessions_valid ON user_sessions(user_id, is_valid) WHERE is_valid = TRUE;
-CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions(expires_at);
-ALTER TABLE user_sessions ENABLE ROW LEVEL SECURITY;
-CREATE POLICY "Users manage own sessions" ON user_sessions FOR ALL USING (user_id = auth.uid());
-"""}
+    """
+    SQL to create the user_sessions table.
+    Run this in your Supabase SQL editor.
+    """
+    sql = """
+    -- Create user_sessions table for production-grade session management
+    CREATE TABLE IF NOT EXISTS user_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token TEXT NOT NULL,
+        fingerprint TEXT,
+        user_agent TEXT,
+        ip_address TEXT,
+        expires_at TIMESTAMPTZ NOT NULL,
+        is_valid BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Index for fast token lookups
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions(user_id, token);
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_valid ON user_sessions(user_id, is_valid) WHERE is_valid = TRUE;
+    CREATE INDEX IF NOT EXISTS idx_user_sessions_expiry ON user_sessions(expires_at);
+
+    -- Enable RLS
+    ALTER TABLE user_sessions ENABLE ROW LEVEL SECURITY;
+
+    -- IMPORTANT: Since we are using Service Key for backend logic, we must allow the service role (or anon if we switch back) to manage these.
+    -- However, standard RLS policies for 'users' table usually block anon inserts.
+    -- Since we are using a custom backend with SERVICE KEY, we can technically bypass RLS,
+    -- but having the policies ensures safety if keys leak.
+    
+    -- Policy: Service Role (or backend) can do anything
+    CREATE POLICY "Service full access" ON user_sessions
+        USING (true) WITH CHECK (true);
+
+    -- Clean up expired sessions automatically (run as scheduled job)
+    -- CREATE OR REPLACE FUNCTION clean_expired_sessions()
+    -- RETURNS void AS $$     -- BEGIN
+    --     UPDATE user_sessions SET is_valid = FALSE WHERE expires_at < NOW() AND is_valid = TRUE;
+    -- END;
+    -- $$ LANGUAGE plpgsql;
+    """
+    return {"sql": sql, "note": "Run this SQL in your Supabase SQL editor"}
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"""
-    ╔══════════════════════════════════════╗
-    ║      HeloXAI ULTIMATE Server v2.0          ║
-    ╠══════════════════════════════════════════╣
-    ║  Chat Model: {CHAT_MODEL:<30} ║
-    ║  File Handling: Archives, Code, Docs     ║
-    ║  Auth: Production Session Management      ║
-    ║  API:        http://localhost:8000         ║
-    ╚═══════════════════════════════════════════╝
-    """)
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
