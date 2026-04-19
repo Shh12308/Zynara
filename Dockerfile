@@ -1,12 +1,12 @@
-# 1. Base Image (CHANGED TO A STABLE TAG)
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04
+# 1. Base Image
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=UTC
 ENV PYTHONUNBUFFERED=1
 
 # 2. System Updates & Dependencies
-# Added build-essential because 'base' doesn't include compilers like 'devel' does
+# FIXED: Corrected typo in libxslt1-dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpoppler-cpp-dev \
     poppler-utils \
     libxml2-dev \
-    libxlst1.1-dev \
+    libxslt1-dev \
     antiword \
     && rm -rf /var/lib/apt/lists/*
 
