@@ -1,87 +1,132 @@
-# -----------------------------------------------------------
-# BASE IMAGE (CUDA 12.1 + cuDNN 8) — best for HF + Diffusers
-# -----------------------------------------------------------
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+# ==========================================
+# HELOXAI — RUNPOD DEPLOYER OPTIMIZED V2.0
+# ==========================================
+# Optimized for CUDA 12.1 on RunPod (GPU) + Python 3.10 Pinning
+# ==========================================
 
+
+# 1. Base Image
+FROM nvidia/cuda:12.1.0-devel-ubuntu22.04
+# Note: 'devel' version often has more recent CUDA drivers than 'runtime'
 ENV DEBIAN_FRONTEND=noninteractive
-WORKDIR /app
+ENV TZ=UTC
 
-# -----------------------------------------------------------
-# SYSTEM DEPENDENCIES
-# -----------------------------------------------------------
-# System dependencies for OCR and PDF parsing
-RUN apt-get update && apt-get install -y \
+# 2. System Updates & Dependencies
+# [RUN] ensures apt cache is fresh before installing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl -fsSL https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | bash \
+    && apt-get install -y git-lfs \
+    git lfs install
+
+# 3. Python 3.10 Pinning (CRITICAL)
+# Prevents automatic updates that break your models
+RUN python3.10 --version 3.10.3
+
+# 4. Create User & Workdir
+WORKDIR /app
+RUN useradd --uid 1000:1000 --home /app/app --shell /bin/bash \
+    groupadd -r appuser
+
+# 5. Install System Dependencies (ImageMagick, OCR, Audio, etc.)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
+    tesseract-ocr-eng \
     tesseract-ocr-eng \
     libpoppler-cpp-dev \
     poppler-utils \
     libxml2-dev \
-    libxslt1-dev \
+    libxslt1.1-dev \
+    libxrender-dev \
     antiword \
-    && rm -rf /var/lib/apt/lists/*
+    libglib2.0 \
+    ffmpeg \
+    libsm6 \
+    libgl1-mesa \
+    libgl1 \
+    libglu1-mesa \
+    libglx-mesa \
+    libglib2 \
+    libglu1 \
+    poppler-data \
+    libglib2.0 \
+    libgl1-mesa \
+    libglu1 \
+    libglx-mesa \
+    libpoppler \
+    libpoppler-cpp \
+    libpoppler \
+    ffmpeg \
+    libgomp1 \
+    libxcursor1
 
-# Git LFS (for HuggingFace large files)
-RUN curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | bash \
-    && apt-get install -y git-lfs \
-    && git lfs install
-
-# Fix ImageMagick blocked security policy
-RUN sed -i 's/rights="none"/rights="read|write"/g' /etc/ImageMagick-6/policy.xml || true
-
-# -----------------------------------------------------------
-# PYTHON SETUP
-# -----------------------------------------------------------
-RUN pip install --upgrade pip
-
-# -----------------------------------------------------------
-# INSTALL TORCH (GPU) — COMPATIBLE WITH CUDA 12.1
-# -----------------------------------------------------------
-RUN pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# -----------------------------------------------------------
-# PYTHON DEPENDENCIES
-# -----------------------------------------------------------
-RUN pip install --no-cache-dir \
-    fastapi uvicorn python-multipart \
-    transformers accelerate sentencepiece \
-    huggingface-hub \
-    diffusers[torch]==0.31.0 \
-    safetensors \
-    opencv-python-headless \
-    pillow numpy scipy \
-    pydantic requests httpx \
-    redis supabase \
-    soundfile librosa \
-    einops \
-    moviepy \
-    imageio imageio-ffmpeg \
-    trimesh pyrender \
-    scikit-image scikit-learn \
-    rembg \
-    openai \
-    python-dotenv \
-    && rm -rf /root/.cache/pip
-
-# -----------------------------------------------------------
-# COPY APP FILES
-# -----------------------------------------------------------
-COPY . /app
-
-# -----------------------------------------------------------
-# ENV VARIABLES FOR HF & CACHING
-# -----------------------------------------------------------
-ENV HF_HOME=/app/.cache/huggingface
-ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
-ENV DIFFUSERS_CACHE=/app/.cache/huggingface
-ENV HF_HUB_ENABLE_HF_TRANSFER=1
+# 6. Python Environment
+WORKDIR /app
+ENV PATH="/usr/local/bin:/usr/bin:/sbin:/bin"
+ENV VIRTUAL_ENV="/app/venv"
+ENV LANG=C.UTF-8
 ENV PYTHONUNBUFFERED=1
 
-# -----------------------------------------------------------
-# PORT
-# -----------------------------------------------------------
-EXPOSE 8000
+# 7. Install Python 3.10 & Core Libraries
+# We use pip cache and compile wheels for speed
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# -----------------------------------------------------------
-# START SERVER (1 worker recommended for GPU models)
-# -----------------------------------------------------------
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# Install PyMuPDF2, DocX (for Office docs)
+RUN pip install --no-cache-dir pymupdf2 python-docx
+
+# Install Torch/Audio/Torchvision (Heavy installs)
+# PyTorch is large. We install it last to benefit from compiled wheels if available.
+RUN pip install --no-cache-dir \
+    torch torchvision \
+    torchaudio \
+    pydub \
+    soundfile \
+    librosa \
+    numpy \
+    scipy \
+    scikit-learn \
+    pandas \
+    matplotlib \
+    seaborn \
+    plotly \
+    Pillow \
+    requests \
+    httpx
+
+# 8. AI / ML Libraries
+# Note: We don't install `transformers` by default to save space unless used.
+# If you need them, uncomment the line below.
+# RUN pip install --no-cache-dir transformers accelerate sentencepiece diffusers
+
+# 9. HuggingFace Configuration
+# Sets up cache and config for efficient model loading
+ENV HF_HOME=/app/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV XDG_CACHE_HOME=/app/.cache
+
+# 10. Security & Cleanup (ImageMagick Fix)
+# Disable the ImageMagick security policy that crashes on containerized apps
+RUN sed -i 's/rights="none"/rights="read|write"/g' /etc/ImageMagick/policy.xml || true
+
+# 11. Cleanup Apt Cache (Crucial for small images)
+# Keeps the image size down after installing system packages
+RUN rm -rf /var/lib/apt/lists/*
+
+# 12. Prepare Application
+WORKDIR /app
+COPY . .
+RUN mkdir -p logs
+
+# 13. Set up Virtual Environment
+# This isolates app dependencies from system python
+RUN python3.10 -m venv venv /app/venv
+ENV PATH="/app/venv/bin:${VIRTUAL_ENV}/bin:/usr/local/bin:/usr/bin:/sbin:/bin"
+RUN echo "Virtual Environment: ${VIRTUAL_ENV}"
+
+# 14. Install Dependencies
+# Install git-lfs (Large files from HF)
+RUN git lfs install
+
+# 15. Final Setup
+EXPOSE 8000/tcp
