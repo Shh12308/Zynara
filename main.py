@@ -53,7 +53,6 @@ LOGO_URL = os.getenv("LOGO_URL", "https://heloxai.xyz/logo.png")
 # UPGRADED MODEL CONFIGS
 # =========================
 # Using Llama 3.1 405B on Groq for advanced reasoning and coding
-# This replaces Llama 3.3 70B for a "bigger" version.
 DEFAULT_LLM_MODEL = "llama-3.1-405b-reasoning"
 CODE_MODEL = "llama-3.1-405b-reasoning" # Also using 405B for code
 
@@ -2303,7 +2302,7 @@ async def analyze_file(
     - Archives (.zip, .tar, .gz, etc.) - extracts and analyzes contents
     - Documents (.pdf, .txt, .md, .csv, etc.)
     - Images (visual analysis)
-    - Large files (up to 50MB single, 100MB archives)
+    - Large files (up to 50MB single,100MB archives)
     """
     user = await get_user(req, Response())
     
@@ -2536,6 +2535,164 @@ async def logout(req: Request, res: Response):
     clear_session_cookies(res)
     
     return {"status": "logged_out"}
+
+
+# =========================
+# ELEVENLABS & CHAT UTILS ENDPOINTS
+# =========================
+@app.get("/tts/voices")
+async def get_voices(request: Request, response: Response):
+    """Fetch available voices from ElevenLabs"""
+    try:
+        headers = get_elevenlabs_headers()
+        async with httpx.AsyncClient() as client:
+            r = await client.get("https://api.elevenlabs.io/v1/voices", headers=headers)
+            r.raise_for_status()
+            return r.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"ElevenLabs Voices Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch voices.")
+    except Exception as e:
+        logger.error(f"Voices Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
+
+
+@app.post("/tts")
+async def text_to_speech(req: TTSRequest):
+    """Text-to-Speech using ElevenLabs"""
+    try:
+        if not ELEVENLABS_API_KEY:
+            raise HTTPException(status_code=500, detail="ElevenLabs API Key not configured.")
+
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{req.voice}"
+        headers = get_elevenlabs_headers()
+        
+        # Payload for ElevenLabs
+        payload = {
+            "text": req.text,
+            "model_id": "eleven_multilingual_v2",
+            "output_format": "mp3_44100_128"
+        }
+
+        async def stream_audio():
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream("POST", url, headers=headers, json=payload) as r:
+                    r.raise_for_status()
+                    async for chunk in r.aiter_bytes():
+                        yield chunk
+
+        return StreamingResponse(stream_audio(), media_type="audio/mpeg")
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"TTS Error: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail="TTS failed.")
+    except Exception as e:
+        logger.error(f"TTS Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
+
+
+@app.post("/stt")
+async def speech_to_text(file: UploadFile = File(...)):
+    """Speech-to-Text (STT) using ElevenLabs Scribe"""
+    try:
+        if not ELEVENLABS_API_KEY:
+            raise HTTPException(status_code=500, detail="ElevenLabs API Key not configured.")
+
+        url = "https://api.elevenlabs.io/v1/speech-to-text"
+        headers = {"xi-api-key": ELEVENLABS_API_KEY}
+        
+        # ElevenLabs STT requires form-data with 'file' and 'model_id'
+        data = {"model_id": "scribe_v1"}
+        
+        # Read file content
+        file_content = await file.read()
+        
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(
+                url, 
+                headers=headers, 
+                data=data, 
+                files={"file": (file.filename, file_content, file.content_type)}
+            )
+            r.raise_for_status()
+            return r.json()
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"STT Error: {e.response.status_code}")
+        raise HTTPException(status_code=e.response.status_code, detail="Speech recognition failed.")
+    except Exception as e:
+        logger.error(f"STT Error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error.")
+
+
+@app.post("/regenerate")
+async def regenerate_response(req: RegenerateRequest):
+    """Regenerate the last assistant response for a conversation"""
+    if not req.conversation_id:
+        raise HTTPException(status_code=400, detail="Conversation ID required")
+
+    try:
+        # 1. Fetch history
+        history = await get_history(req.conversation_id)
+        
+        # 2. If last message was from assistant, we conceptually 'pop' it (skip it)
+        # NOTE: We do NOT delete it from DB. The frontend handles visual replacement.
+        if history and history[-1]["role"] == "assistant":
+            # Remove from local list to avoid sending it back to LLM
+            history.pop()
+        
+        # 3. Find the last user message to use as prompt
+        prompt = None
+        for msg in reversed(history):
+            if msg["role"] == "user":
+                prompt = msg["content"]
+                break
+        
+        if not prompt:
+            raise HTTPException(status_code=400, detail="No user message found to regenerate from.")
+
+        # 4. Stream response using existing logic
+        # We construct the history up to the last user message
+        # (history currently contains msgs up to the last AI msg which we popped, so it ends at User msg)
+        
+        base_system = get_system_prompt(prompt)
+        full_history = [{"role": "system", "content": base_system}] + history
+        
+        async def event_gen():
+            try:
+                full_text = ""
+                async for token in stream_groq_chat(full_history):
+                    full_text += token
+                    # Use SSE format expected by frontend
+                    yield sse({"type": "token", "text": token})
+                
+                # Save the new assistant message
+                # We save it as a new entry, effectively appending to the conversation
+                # The frontend usually deletes the old AI message visually, leaving DB with: User... OldAI, NewAI
+                await save_message("system", req.conversation_id, "assistant", full_text)
+                
+                yield sse({"type": "done"})
+            except Exception as e:
+                logger.error(f"Regenerate Error: {e}")
+                yield sse({"type": "error", "message": "Regeneration failed."})
+
+        return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+    except Exception as e:
+        logger.error(f"Regenerate Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/newchat")
+async def create_new_chat():
+    """Initialize a new chat session ID"""
+    # Generate a new ID
+    new_id = str(uuid.uuid4())
+    
+    # You could insert a 'conversations' row here if desired
+    # await _execute_supabase_with_retry(...)
+    
+    return JSONResponse(content={"conversation_id": new_id})
 
 
 # =========================
