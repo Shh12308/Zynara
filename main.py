@@ -11,6 +11,7 @@ import zipfile
 import tempfile
 import mimetypes
 import shutil
+import time
 from io import BytesIO
 from enum import Enum
 from dataclasses import dataclass
@@ -22,8 +23,6 @@ from fastapi import FastAPI, Request, Response, HTTPException, Depends, UploadFi
 from fastapi.responses import StreamingResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
-import time
-
 import httpx
 from supabase import create_client
 
@@ -1271,7 +1270,7 @@ class AdvancedIntentDetector:
                 r'\b(calculate|compute|solve|evaluate)\s+(this|the|a)\s*(equation|expression|formula|problem|integral|derivative)?',
                 r'\b(math|mathematics|algebra|calculus|geometry|statistics|probability|linear\s+algebra)\s*(problem|equation|question)?',
                 r'\b(\d+[\.\d]*\s*[\+\-\*\/\^%\=]\s*[\.\d]*)',
-                r'\b(integral|derivative|differentiat|integrat)\s*(of|the)?',
+                r'\b(integral|derivative|differentiate|integrat)\s*(of|the)?',
                 r'\b(prove|proof)\s+(that|this|the)',
                 r'\b(formula|equation)\s+(for|to\s+calculate|to\s+find)',
             ],
@@ -1676,6 +1675,7 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     stream: bool = True
     remember: bool = True  # New: persist session
+    model: Optional[str] = DEFAULT_LLM_MODEL # Added model parameter
 
 
 class RegenerateRequest(BaseModel):
@@ -2084,7 +2084,7 @@ async def save_message(user_id: str, conv_id: str, role: str, content: str):
 async def ask_universal(req: Request, res: Response):
     content_type = req.headers.get("content-type", "")
     
-    # FIX "INETS" (Inputs): Initialize body dict and parse request ONCE.
+    # FIX "INPUTS" (Inputs): Initialize body dict and parse request ONCE.
     # Parsing req.json() twice consumes the stream and causes the second parse to fail.
     body = {}
     remember = True
@@ -2117,6 +2117,7 @@ async def ask_universal(req: Request, res: Response):
 
         if file.content_type and file.content_type.startswith("image/"):
             # Note: handle_image_analysis is not defined in provided snippet, assuming it exists or fallback
+            # For the sake of a runnable snippet, I'll return a placeholder or error
             return JSONResponse({"error": "Image analysis endpoint not implemented in this snippet"}, status_code=501)
         
         result = await extract_file_content(content, file.filename)
@@ -2126,6 +2127,7 @@ async def ask_universal(req: Request, res: Response):
     prompt = body.get("prompt", "")
     conv_id = body.get("conversation_id")
     stream = body.get("stream", True)
+    model = body.get("model", DEFAULT_LLM_MODEL)
 
     if not prompt:
         raise HTTPException(400, "Prompt required")
@@ -2230,7 +2232,7 @@ async def ask_universal(req: Request, res: Response):
                 full_history = [{"role": "system", "content": base_system}] + history
                 
                 full_text = ""
-                async for token in stream_groq_chat(full_history):
+                async for token in stream_groq_chat(full_history, model=model):
                     if task.cancelled():
                         break
                     full_text += token
@@ -2272,7 +2274,7 @@ async def ask_universal(req: Request, res: Response):
             r = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers=get_groq_headers(),
-                json={"model": DEFAULT_LLM_MODEL, "messages": full_history, "max_tokens": 1024}
+                json={"model": model, "messages": full_history, "max_tokens": 1024}
             )
             r.raise_for_status()
             reply = r.json()["choices"][0]["message"]["content"]
@@ -2329,11 +2331,8 @@ async def analyze_file(
     
     # Handle images separately
     if content_type.startswith("image/") or category == FileCategory.IMAGE:
-        # Assuming handle_image_analysis is defined elsewhere or replaced for this snippet
-        # For the sake of a runnable snippet, I'll return a placeholder or error
-        return JSONResponse({"error": "Image analysis requires implementation in this environment"}, status_code=501)
-        # return await handle_image_analysis(content, stream)
-
+        return await handle_image_analysis(content, filename, stream)
+    
     # Extract content from file
     result = await extract_file_content(content, filename)
     
@@ -2349,8 +2348,7 @@ async def analyze_file(
         return await handle_archive_analysis(result, stream)
     
     # Handle single file analysis
-    # return await handle_text_analysis(result.content, stream, file_metadata=result.metadata)
-    return JSONResponse(content=result.to_dict())
+    return await handle_text_analysis(result, stream, file_metadata=result.metadata)
 
 
 async def handle_archive_analysis(
@@ -2449,6 +2447,109 @@ Be organized and clear in your analysis."""
         "metadata": result.metadata,
         "files": result.files
     }
+
+
+async def handle_text_analysis(
+    result: FileExtractionResult,
+    stream: bool,
+    file_metadata: Dict[str, Any] = None
+):
+    """Handle single text/code file analysis via LLM"""
+    if file_metadata is None: file_metadata = result.metadata
+    
+    content = result.content
+    filename = result.metadata.get("filename", "file.txt")
+    
+    # Prepare prompt for LLM to analyze the file
+    prompt = f"""I have uploaded a file named '{filename}'.
+Here is its content:
+
+{content}
+
+Please analyze this file. If it is code, review it for errors or improvements. If it is a document, summarize it. If it is data, describe its structure."""
+
+    messages = [
+        {
+            "role": "system",
+            "content": get_system_prompt("") + "You are a helpful coding and document analysis assistant. Provide clear, actionable insights on uploaded files."
+        },
+        {
+            "role": "user",
+            "content": prompt
+        }
+    ]
+
+    if stream:
+        async def gen():
+            task = asyncio.current_task()
+            try:
+                # Send metadata first
+                yield sse({
+                    "type": "file_metadata",
+                    "metadata": file_metadata,
+                    "files": []
+                })
+                
+                full_text = ""
+                async for token in stream_groq_chat(messages):
+                    if task.cancelled():
+                        break
+                    full_text += token
+                    yield sse({"type": "token", "text": token})
+                
+                yield sse({"type": "done"})
+            except Exception as e:
+                logger.error(f"Text analysis stream error: {e}")
+                yield sse({"type": "error", "message": "Analysis failed."})
+        
+        return StreamingResponse(gen(), media_type="text/event-stream")
+    else:
+        # Non-streaming response
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers=get_groq_headers(),
+                json={"model": DEFAULT_LLM_MODEL, "messages": messages}
+            )
+            r.raise_for_status()
+            reply = r.json()["choices"][0]["message"]["content"]
+            
+            return {
+                "analysis": reply,
+                "metadata": file_metadata,
+                "content": result.content # returning raw content as well for frontend use
+            }
+
+
+async def handle_image_analysis(
+    content: bytes,
+    filename: str,
+    stream: bool
+):
+    """Stub for image analysis - in a real env, this would call OpenAI Vision"""
+    metadata = {
+        "filename": filename,
+        "category": "image",
+        "size": len(content)
+    }
+    
+    if stream:
+        async def gen():
+            yield sse({
+                "type": "file_metadata",
+                "metadata": metadata,
+                "files": []
+            })
+            # In a real implementation, you would stream the analysis here.
+            yield sse({"type": "token", "text": f"I see an image named {filename}. However, visual analysis is not currently enabled in this backend configuration."})
+            yield sse({"type": "done"})
+        return StreamingResponse(gen(), media_type="text/event-stream")
+    else:
+        return JSONResponse(content={
+            "content": f"[Image: {filename}]",
+            "metadata": metadata,
+            "error": "Vision not enabled"
+        })
 
 
 @app.get("/file-types")
@@ -2748,7 +2849,7 @@ Format complex equations clearly using LaTeX-style notation where appropriate.""
                 active_streams.pop(user["id"], None)
 
         return StreamingResponse(gen(), media_type="text/event-stream")
-
+    
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
