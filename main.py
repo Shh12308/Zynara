@@ -44,8 +44,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY").strip() if os.getenv("GROQ_API_KEY") el
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-WOLFRAM_ALPHA_API_KEY = os.getenv("WOLFRAM_ALPHA_API_KEY") # Added
-JUDGE0_API_KEY = os.getenv("JUDGE0_API_KEY") # Added
+WOLFRAM_ALPHA_API_KEY = os.getenv("WOLFRAM_ALPHA_API_KEY")
+JUDGE0_API_KEY = os.getenv("JUDGE0_API_KEY")
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY") # ADDED: SerpApi for Search
 LOGO_URL = os.getenv("LOGO_URL", "https://heloxai.xyz/logo.png")
 
 # =========================
@@ -53,7 +54,7 @@ LOGO_URL = os.getenv("LOGO_URL", "https://heloxai.xyz/logo.png")
 # =========================
 # Using Gemma 2 27B on Groq for advanced reasoning and coding
 DEFAULT_LLM_MODEL = "gemma-2-27b-it"
-CODE_MODEL = "gemma-2-27b-it" # Also using Gemma 2 27B for code
+CODE_MODEL = "gemma-2-27b-it"
 
 # File handling config
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
@@ -73,7 +74,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 app = FastAPI(
     title="HeloXAI API",
     description="Advanced AI Assistant Backend (RunPod Ready)",
-    version="2.1.0-Optimized"
+    version="2.2.0-SerpApi"
 )
 
 # CORS
@@ -124,48 +125,27 @@ class FileCategory(Enum):
 
 # Comprehensive file type mappings
 CODE_EXTENSIONS = {
-    # Python
     '.py', '.pyw', '.pyx', '.pyd', '.pyi', '.py3',
-    # JavaScript/TypeScript
     '.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts',
-    # Web
     '.html', '.htm', '.css', '.scss', '.sass', '.less', '.styl',
     '.vue', '.svelte', '.astro',
-    # Java/JVM
     '.java', '.kt', '.kts', '.scala', '.groovy', '.gradle',
-    '.clj', '.cljs', '.hs',
-    # C/C++
     '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.hxx', '.inl',
-    # C#
     '.cs', '.csx',
-    # Go
     '.go',
-    # Rust
     '.rs',
-    # PHP
     '.php', '.phtml',
-    # Ruby
     '.rb', '.erb', '.rake', '.gemspec',
-    # Swift
     '.swift',
-    # Dart/Flutter
     '.dart',
-    # Shell
     '.sh', '.bash', '.zsh', '.fish', '.ps1', '.psm1', '.bat', '.cmd',
-    # Lua
     '.lua',
-    # Perl
     '.pl', '.pm',
-    # R
     '.r', '.R',
-    # SQL
     '.sql', '.mysql', '.pgsql', '.sqlite',
-    # Config/Data formats
     '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
     '.env', '.properties', '.xml',
-    # Markup
     '.md', '.rst', '.asciidoc', '.adoc', '.tex', '.latex',
-    # Other
     '.dockerfile', '.makefile', '.cmake', '.proto', '.graphql', '.gql',
     '.tf', '.hcl', '.sol', '.move', '.cairo',
 }
@@ -1080,7 +1060,7 @@ class IntentCategory(Enum):
     CODE_GENERATION = "code_generation"
     CODE_REVIEW = "code_review"
     CODE_DEBUG = "code_debug"
-    CODE_EXECUTION = "code_execution"  # ADDED: Was missing, causing crash
+    CODE_EXECUTION = "code_execution"
     DOCUMENT_CREATION = "document_creation"
     DATA_ANALYSIS = "data_analysis"
     DATA_VISUALIZATION = "data_visualization"
@@ -1519,7 +1499,7 @@ class AdvancedIntentDetector:
             IntentCategory.EXPLANATION: ["llm"],
             IntentCategory.CREATIVE_WRITING: ["llm"],
             IntentCategory.MATHEMATICAL: ["code_exec", "llm"],
-            IntentCategory.RESEARCH: ["web_search", "llm"],
+            IntentCategory.RESEARCH: ["web_search", "llm"], # Web Search enabled here
             IntentCategory.CONVERSATION: ["llm"],
         }
 
@@ -1674,8 +1654,8 @@ class ChatRequest(BaseModel):
     prompt: str
     conversation_id: Optional[str] = None
     stream: bool = True
-    remember: bool = True  # New: persist session
-    model: Optional[str] = DEFAULT_LLM_MODEL # Added model parameter
+    remember: bool = True
+    model: Optional[str] = DEFAULT_LLM_MODEL
 
 
 class RegenerateRequest(BaseModel):
@@ -1684,7 +1664,7 @@ class RegenerateRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
-    voice: str = "rachel"  # Defaulting to Rachel
+    voice: str = "rachel"
 
 
 class IntentInfo(BaseModel):
@@ -1933,7 +1913,7 @@ def get_elevenlabs_headers():
 
 
 # =========================
-# MATH ENGINE (Wolfram Alpha)
+# EXTERNAL TOOLS IMPLEMENTATIONS
 # =========================
 async def solve_math(query: str) -> str:
     """Primary Math Solver using Wolfram Alpha, fallback to LLM"""
@@ -1960,9 +1940,39 @@ async def solve_math(query: str) -> str:
         return r.json()["choices"][0]["message"]["content"]
 
 
-# =========================
-# CODE EXECUTION (Judge0)
-# =========================
+async def search_google(query: str) -> str:
+    """Search Google using SerpApi"""
+    if not SERPAPI_API_KEY:
+        logger.warning("SERPAPI_API_KEY not configured. Skipping web search.")
+        return ""
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            params = {
+                "engine": "google",
+                "q": query,
+                "api_key": SERPAPI_API_KEY,
+                "num": 5  # Top 5 results
+            }
+            response = await client.get("https://serpapi.com/search", params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Format results
+            results = data.get("organic_results", [])
+            formatted_results = []
+            for res in results[:5]: # Limit to top 5
+                title = res.get("title", "N/A")
+                link = res.get("link", "#")
+                snippet = res.get("snippet", "")
+                formatted_results.append(f"Title: {title}\nLink: {link}\nSnippet: {snippet}")
+            
+            return "\n\n".join(formatted_results)
+    except Exception as e:
+        logger.error(f"SerpApi search failed: {e}")
+        return ""
+
+
 JUDGE0_LANGUAGES = {
     "python": 71, "javascript": 63, "java": 62, "cpp": 54,
     "c": 50, "csharp": 51, "go": 60, "rust": 73, "sql": 82
@@ -2048,8 +2058,8 @@ async def get_history(conv_id: str) -> list:
             supabase.table("messages")
             .select("role, content")
             .eq("conversation_id", conv_id)
-            .order("created_at", desc=False) # Oldest first
-            .limit(20), # Last 20 messages context
+            .order("created_at", desc=False)
+            .limit(20),
             description="Fetch History"
         )
         if result.data:
@@ -2084,8 +2094,6 @@ async def save_message(user_id: str, conv_id: str, role: str, content: str):
 async def ask_universal(req: Request, res: Response):
     content_type = req.headers.get("content-type", "")
     
-    # FIX "INPUTS" (Inputs): Initialize body dict and parse request ONCE.
-    # Parsing req.json() twice consumes the stream and causes the second parse to fail.
     body = {}
     remember = True
     
@@ -2105,7 +2113,6 @@ async def ask_universal(req: Request, res: Response):
     else:
         raise HTTPException(415, f"Unsupported content-type: {content_type}")
 
-    # Get User using the extracted remember preference
     user = await get_user(req, res, remember=remember)
 
     # Handle File Upload immediately if present (for Form Data)
@@ -2116,8 +2123,6 @@ async def ask_universal(req: Request, res: Response):
         logger.info(f"File upload: {file.filename} ({format_file_size(len(content))})")
 
         if file.content_type and file.content_type.startswith("image/"):
-            # Note: handle_image_analysis is not defined in provided snippet, assuming it exists or fallback
-            # For the sake of a runnable snippet, I'll return a placeholder or error
             return JSONResponse({"error": "Image analysis endpoint not implemented in this snippet"}, status_code=501)
         
         result = await extract_file_content(content, file.filename)
@@ -2185,7 +2190,6 @@ async def ask_universal(req: Request, res: Response):
             yield sse({"type": "status", "message": "Calculating with Wolfram Alpha..."})
             try:
                 result = await solve_math(prompt)
-                # Simulate streaming for math result
                 for char in result:
                     yield sse({"type": "token", "text": char})
                     await asyncio.sleep(0.01)
@@ -2196,7 +2200,6 @@ async def ask_universal(req: Request, res: Response):
 
     # 2. CODE EXECUTION (Judge0)
     if intent_result and intent_result.intent == IntentCategory.CODE_EXECUTION:
-        # Extract code block
         match = re.search(r"```(\w+)?\n(.*?)```", prompt, re.DOTALL)
         code = match.group(2) if match else prompt
         lang = match.group(1) if match and match.group(1) else "python"
@@ -2211,7 +2214,84 @@ async def ask_universal(req: Request, res: Response):
                 yield sse({"type": "error", "message": str(e)})
         return StreamingResponse(exec_gen(), media_type="text/event-stream")
 
-    # 3. DEFAULT CHAT (Gemma 2 27B)
+    # 3. RESEARCH (SerpApi)
+    if intent_result and intent_result.intent == IntentCategory.RESEARCH:
+        async def research_gen():
+            task = asyncio.current_task()
+            active_streams[user["id"]] = task
+            
+            try:
+                yield sse({"type": "status", "message": "Searching the web..."})
+                search_results = await search_google(prompt)
+                
+                if not search_results:
+                    # Fallback if search fails or no key
+                    yield sse({"type": "token", "text": "I couldn't perform a web search right now, but I'll try to answer from my knowledge.\n\n"})
+                    # Continue with default chat logic
+                    history = await get_history(conv_id) if conv_id else []
+                    base_system = get_system_prompt(prompt) + "\n\nYou are a helpful research assistant."
+                    user_memory = user.get("memory", "")
+                    if user_memory:
+                        base_system += f"\n\nUser Context: {user_memory}"
+                    full_history = [{"role": "system", "content": base_system}] + history
+                    
+                    full_text = ""
+                    async for token in stream_groq_chat(full_history):
+                        if task.cancelled():
+                            break
+                        full_text += token
+                        yield sse({"type": "token", "text": token})
+                        
+                    # Memory Update & Save
+                    new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
+                    if len(new_memory) > 5000:
+                        new_memory = new_memory[-5000:]
+                    asyncio.create_task(update_user_memory(user["id"], new_memory))
+                    await save_message(user["id"], conv_id, "assistant", full_text)
+                else:
+                    # Feed search results to LLM
+                    system_prompt = get_system_prompt(prompt) + """
+You are a research assistant. The user has asked a question that requires current information.
+I have performed a web search and gathered the following results for you.
+
+Search Results:
+""" + search_results + """
+
+Please answer the user's question based on these results. If the results don't contain enough information, say so. Cite the sources if possible."""
+                    
+                    user_memory = user.get("memory", "")
+                    if user_memory:
+                        system_prompt += f"\n\nUser Context: {user_memory}"
+                    
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                    
+                    full_text = ""
+                    async for token in stream_groq_chat(messages):
+                        if task.cancelled():
+                            break
+                        full_text += token
+                        yield sse({"type": "token", "text": token})
+                    
+                    # Memory Update & Save
+                    new_memory = (user_memory + "\n" + full_text[-500:]) if user_memory else full_text[-1000:]
+                    if len(new_memory) > 5000:
+                        new_memory = new_memory[-5000:]
+                    asyncio.create_task(update_user_memory(user["id"], new_memory))
+                    await save_message(user["id"], conv_id, "assistant", full_text)
+                
+                yield sse({"type": "done"})
+            except Exception as e:
+                logger.error(f"Research Stream Error: {e}")
+                yield sse({"type": "error", "message": "An error occurred during research."})
+            finally:
+                active_streams.pop(user["id"], None)
+
+        return StreamingResponse(research_gen(), media_type="text/event-stream")
+
+    # 4. DEFAULT CHAT (Gemma 2 27B)
     if stream:
         async def event_gen():
             task = asyncio.current_task()
@@ -2398,7 +2478,7 @@ You are analyzing an archive file (ZIP, TAR, etc.). The archive contents have be
 
 Your task:
 1. Provide an overview of what this archive contains
-2. Identify the main purpose/type of the project or files
+2. Identify main purpose/type of the project or files
 3. If it's a code project, describe the structure, technologies used, and main functionality
 4. Highlight any important files or configurations
 5. Note any potential issues, missing files, or areas of concern
@@ -2866,18 +2946,7 @@ Format complex equations clearly using LaTeX-style notation where appropriate.""
     await save_message(user["id"], conv_id, "assistant", reply)
     return {"reply": reply}
 
-# =========================
-# ROOT ENDPOINT (Fixes 404 on /)
-# =========================
-@app.get("/")
-async def read_root():
-    return {
-        "message": "HeloXAI Backend is Running",
-        "status": "active",
-        "docs": "/docs",
-        "health": "/health"
-    }
-    
+
 @app.get("/health")
 def health():
     return {
@@ -2885,7 +2954,8 @@ def health():
         "services": {
             "groq_gemma2_27b": bool(GROQ_API_KEY), 
             "judge0": bool(JUDGE0_API_KEY), 
-            "wolfram": bool(WOLFRAM_ALPHA_API_KEY)
+            "wolfram": bool(WOLFRAM_ALPHA_API_KEY),
+            "serpapi": bool(SERPAPI_API_KEY) # Added SerpApi health check
         }
     }
 
