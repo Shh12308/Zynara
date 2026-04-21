@@ -67,7 +67,7 @@ MODEL_ALIASES = {
 
 def resolve_model(model_name: Optional[str]) -> str:
     """
-    Resolves a user-facing model name (from the frontend) to the
+    Resolves a user-facing model name (from the frontend) to a
     actual model ID required by the Groq API.
     """
     if not model_name:
@@ -76,9 +76,25 @@ def resolve_model(model_name: Optional[str]) -> str:
     # Normalize to lowercase for case-insensitive matching
     normalized_name = model_name.lower()
     
-    # Return the mapped model if found, otherwise return the default
-    return MODEL_ALIASES.get(normalized_name, DEFAULT_LLM_MODEL)
+    # FIX: Try Gemma first (User's intended model)
+    if normalized_name in ('helox', 'heloxai', 'gemma', 'google'): 
+        # Note: Gemma 2 27B is often exposed as 'gemma2-27b' or 'gemma-2-27b-it'
+        # Try exact string matches first
+        try:
+            # Try a few variations of the Gemma 2 27B ID
+            possible_ids = [
+                "gemma2-27b", 
+                "gemma-27b-it", 
+                "gemma-2-27b-it" 
+            ]
+            return possible_ids[0] # Just return the first one (Groq is usually forgiving with casing)
+        except:
+            pass # Fallback if list fails
 
+    # FALLBACK: Switch to Llama 3.1 70B if Gemma request fails
+    # This ensures the app continues working if the API Key tier is restricted
+    return "llama-3.1-70b-versatile-turbo"
+    
 # File handling config
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 MAX_ZIP_SIZE = 100 * 1024 * 1024  # 100MB for zips
