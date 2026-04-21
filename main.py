@@ -51,9 +51,9 @@ LOGO_URL = os.getenv("LOGO_URL", "https://heloxai.xyz/logo.png")
 # =========================
 # UPGRADED MODEL CONFIGS
 # =========================
-# Using Llama 3.1 405B on Groq for advanced reasoning and coding
-DEFAULT_LLM_MODEL = "llama-3.1-405b-reasoning"
-CODE_MODEL = "llama-3.1-405b-reasoning" # Also using 405B for code
+# Using Gemma 2 27B on Groq for advanced reasoning and coding
+DEFAULT_LLM_MODEL = "gemma-2-27b-it"
+CODE_MODEL = "gemma-2-27b-it" # Also using Gemma 2 27B for code
 
 # File handling config
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
@@ -1936,7 +1936,7 @@ def get_elevenlabs_headers():
 # MATH ENGINE (Wolfram Alpha)
 # =========================
 async def solve_math(query: str) -> str:
-    """Primary Math Solver using Wolfram Alpha, fallback to Llama 405B"""
+    """Primary Math Solver using Wolfram Alpha, fallback to LLM"""
     if wolframalpha and WOLFRAM_ALPHA_API_KEY:
         try:
             client = wolframalpha.Client(WOLFRAM_ALPHA_API_KEY)
@@ -2211,7 +2211,7 @@ async def ask_universal(req: Request, res: Response):
                 yield sse({"type": "error", "message": str(e)})
         return StreamingResponse(exec_gen(), media_type="text/event-stream")
 
-    # 3. DEFAULT CHAT (Llama 405B)
+    # 3. DEFAULT CHAT (Gemma 2 27B)
     if stream:
         async def event_gen():
             task = asyncio.current_task()
@@ -2872,7 +2872,7 @@ def health():
     return {
         "status": "healthy", 
         "services": {
-            "groq_llama405b": bool(GROQ_API_KEY), 
+            "groq_gemma2_27b": bool(GROQ_API_KEY), 
             "judge0": bool(JUDGE0_API_KEY), 
             "wolfram": bool(WOLFRAM_ALPHA_API_KEY)
         }
