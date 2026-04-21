@@ -5,7 +5,7 @@ services:
     build: .
     container_name: heloxai_backend
     ports:
-      - "8000:8000" # Maps host port 8000 to container port 8000
+      - "8080:8080" # Maps host port 8000 to container port 8000
     restart: always
     env_file:
       - .env # Loads variables from the .env file
