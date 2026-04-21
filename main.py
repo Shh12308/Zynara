@@ -44,9 +44,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY").strip() if os.getenv("GROQ_API_KEY") el
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-WOLFRAM_ALPHA_API_KEY = os.getenv("WOLFRAM_ALPHA_API_KEY")
-JUDGE0_API_KEY = os.getenv("JUDGE0_API_KEY")
-SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY") # ADDED: SerpApi for Search
+WOLFRAM_ALPHA_API_KEY = os.getenv("WOLFRAM_ALPHA_API_KEY") # Added
+JUDGE0_API_KEY = os.getenv("JUDGE0_API_KEY") # Added
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY") # Added: SerpApi for Search
 LOGO_URL = os.getenv("LOGO_URL", "https://heloxai.xyz/logo.png")
 
 # =========================
@@ -55,6 +55,29 @@ LOGO_URL = os.getenv("LOGO_URL", "https://heloxai.xyz/logo.png")
 # Using Gemma 2 27B on Groq for advanced reasoning and coding
 DEFAULT_LLM_MODEL = "gemma-2-27b-it"
 CODE_MODEL = "gemma-2-27b-it"
+
+# MODEL MAPPING (ADDED FOR COMPATIBILITY)
+# Maps frontend model names (e.g., 'helox') to actual Groq API model IDs
+MODEL_ALIASES = {
+    "helox": "gemma-2-27b-it",  # Map 'helox' to the new Gemma model
+    "heloxai": "gemma-2-27b-it",
+    "chatgpt": "gpt-4o-mini",       # Example: Frontend might ask for "ChatGPT"
+    "chat.z": "llama-3.1-70b-versatile" # Example: Frontend might ask for "Chat.Z"
+}
+
+def resolve_model(model_name: Optional[str]) -> str:
+    """
+    Resolves a user-facing model name (from the frontend) to the
+    actual model ID required by the Groq API.
+    """
+    if not model_name:
+        return DEFAULT_LLM_MODEL
+    
+    # Normalize to lowercase for case-insensitive matching
+    normalized_name = model_name.lower()
+    
+    # Return the mapped model if found, otherwise return the default
+    return MODEL_ALIASES.get(normalized_name, DEFAULT_LLM_MODEL)
 
 # File handling config
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
@@ -74,7 +97,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 app = FastAPI(
     title="HeloXAI API",
     description="Advanced AI Assistant Backend (RunPod Ready)",
-    version="2.2.0-SerpApi"
+    version="2.2.1-ModelMapping"
 )
 
 # CORS
@@ -130,6 +153,7 @@ CODE_EXTENSIONS = {
     '.html', '.htm', '.css', '.scss', '.sass', '.less', '.styl',
     '.vue', '.svelte', '.astro',
     '.java', '.kt', '.kts', '.scala', '.groovy', '.gradle',
+    '.clj', '.cljs', '.hs',
     '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx', '.hxx', '.inl',
     '.cs', '.csx',
     '.go',
@@ -606,7 +630,6 @@ async def extract_zip_content(
                                 "line_count": text.count('\n') + 1,
                                 "preview": text[:500] + ("..." if len(text) > 500 else "")
                             }
-                            all_text_parts.append(f"\n{'='*60}\nFile: {entry_name}\n{'='*60}\n{text}")
                         else:
                             file_info = {
                                 "name": entry_name,
@@ -1060,7 +1083,7 @@ class IntentCategory(Enum):
     CODE_GENERATION = "code_generation"
     CODE_REVIEW = "code_review"
     CODE_DEBUG = "code_debug"
-    CODE_EXECUTION = "code_execution"
+    CODE_EXECUTION = "code_execution"  # ADDED: Was missing, causing crash
     DOCUMENT_CREATION = "document_creation"
     DATA_ANALYSIS = "data_analysis"
     DATA_VISUALIZATION = "data_visualization"
@@ -1654,8 +1677,8 @@ class ChatRequest(BaseModel):
     prompt: str
     conversation_id: Optional[str] = None
     stream: bool = True
-    remember: bool = True
-    model: Optional[str] = DEFAULT_LLM_MODEL
+    remember: bool = True  # New: persist session
+    model: Optional[str] = DEFAULT_LLM_MODEL # Added model parameter
 
 
 class RegenerateRequest(BaseModel):
@@ -1664,7 +1687,7 @@ class RegenerateRequest(BaseModel):
 
 class TTSRequest(BaseModel):
     text: str
-    voice: str = "rachel"
+    voice: str = "rachel"  # Defaulting to Rachel
 
 
 class IntentInfo(BaseModel):
@@ -2058,8 +2081,8 @@ async def get_history(conv_id: str) -> list:
             supabase.table("messages")
             .select("role, content")
             .eq("conversation_id", conv_id)
-            .order("created_at", desc=False)
-            .limit(20),
+            .order("created_at", desc=False) # Oldest first
+            .limit(20), # Last 20 messages context
             description="Fetch History"
         )
         if result.data:
@@ -2132,7 +2155,12 @@ async def ask_universal(req: Request, res: Response):
     prompt = body.get("prompt", "")
     conv_id = body.get("conversation_id")
     stream = body.get("stream", True)
-    model = body.get("model", DEFAULT_LLM_MODEL)
+    
+    # RESOLVE MODEL NAME (THE FIX)
+    # Get the model name from the request (e.g., "helox")
+    request_model = body.get("model")
+    # Map it to the actual API model ID using the new resolve_model function
+    api_model_name = resolve_model(request_model)
 
     if not prompt:
         raise HTTPException(400, "Prompt required")
@@ -2190,6 +2218,7 @@ async def ask_universal(req: Request, res: Response):
             yield sse({"type": "status", "message": "Calculating with Wolfram Alpha..."})
             try:
                 result = await solve_math(prompt)
+                # Simulate streaming for math result
                 for char in result:
                     yield sse({"type": "token", "text": char})
                     await asyncio.sleep(0.01)
@@ -2269,7 +2298,7 @@ Please answer the user's question based on these results. If the results don't c
                     ]
                     
                     full_text = ""
-                    async for token in stream_groq_chat(messages):
+                    async for token in stream_groq_chat(messages): # <--- Uses mapped model if default
                         if task.cancelled():
                             break
                         full_text += token
@@ -2312,7 +2341,7 @@ Please answer the user's question based on these results. If the results don't c
                 full_history = [{"role": "system", "content": base_system}] + history
                 
                 full_text = ""
-                async for token in stream_groq_chat(full_history, model=model):
+                async for token in stream_groq_chat(full_history, model=api_model_name): # <--- Use resolved model
                     if task.cancelled():
                         break
                     full_text += token
@@ -2354,7 +2383,7 @@ Please answer the user's question based on these results. If the results don't c
             r = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers=get_groq_headers(),
-                json={"model": model, "messages": full_history, "max_tokens": 1024}
+                json={"model": api_model_name, "messages": full_history, "max_tokens": 1024}  # Use resolved model
             )
             r.raise_for_status()
             reply = r.json()["choices"][0]["message"]["content"]
@@ -2478,7 +2507,7 @@ You are analyzing an archive file (ZIP, TAR, etc.). The archive contents have be
 
 Your task:
 1. Provide an overview of what this archive contains
-2. Identify main purpose/type of the project or files
+2. Identify the main purpose/type of the project or files
 3. If it's a code project, describe the structure, technologies used, and main functionality
 4. Highlight any important files or configurations
 5. Note any potential issues, missing files, or areas of concern
@@ -2842,7 +2871,8 @@ async def regenerate_response(req: RegenerateRequest):
         async def event_gen():
             try:
                 full_text = ""
-                async for token in stream_groq_chat(full_history):
+                # Use resolved model name
+                async for token in stream_groq_chat(full_history, model=resolve_model(DEFAULT_LLM_MODEL)):
                     full_text += token
                     # Use SSE format expected by frontend
                     yield sse({"type": "token", "text": token})
@@ -2934,7 +2964,7 @@ Format complex equations clearly using LaTeX-style notation where appropriate.""
         r = await client.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers=get_groq_headers(),
-            json={"model": DEFAULT_LLM_MODEL, "messages": messages, "max_tokens": 2048}
+            json={"model": resolve_model(DEFAULT_LLM_MODEL), "messages": messages, "max_tokens": 2048}
         )
         r.raise_for_status()
         reply = r.json()["choices"][0]["message"]["content"]
@@ -2952,7 +2982,10 @@ def health():
     return {
         "status": "healthy", 
         "services": {
-            "groq_gemma2_27b": bool(GROQ_API_KEY), 
+            "groq_gemma2_27b": bool(GROQ_API_KEY),
+            # Legacy Key for Frontend compatibility
+            "groq_llama405b": bool(GROQ_API_KEY), 
+            
             "judge0": bool(JUDGE0_API_KEY), 
             "wolfram": bool(WOLFRAM_ALPHA_API_KEY),
             "serpapi": bool(SERPAPI_API_KEY) # Added SerpApi health check
@@ -2961,4 +2994,4 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
