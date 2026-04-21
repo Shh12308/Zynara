@@ -2866,7 +2866,18 @@ Format complex equations clearly using LaTeX-style notation where appropriate.""
     await save_message(user["id"], conv_id, "assistant", reply)
     return {"reply": reply}
 
-
+# =========================
+# ROOT ENDPOINT (Fixes 404 on /)
+# =========================
+@app.get("/")
+async def read_root():
+    return {
+        "message": "HeloXAI Backend is Running",
+        "status": "active",
+        "docs": "/docs",
+        "health": "/health"
+    }
+    
 @app.get("/health")
 def health():
     return {
