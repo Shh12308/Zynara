@@ -288,7 +288,7 @@ def format_file_size(size_bytes: int) -> str:
 
 
 # =========================
-# FILE EXTRACTOR (unchanged logic, kept for brevity)
+# FILE EXTRACTOR (kept for brevity)
 # =========================
 class FileExtractionResult:
     def __init__(self, content: str, files: List[Dict[str, Any]] = None,
@@ -566,7 +566,7 @@ You are MULTIMODAL and MEDIA-AWARE:
 - You can GENERATE images using Flux 2 Max, videos using Google Veo 3.1, and music using MiniMax Music 2.6.
 - You can ANALYZE and UNDERSTAND images, videos, and audio that users share with you.
 - You can MODIFY and UPDATE previously generated media — you remember everything you've created in this conversation.
-- When you generate media, you know exactly what it contains because you crafted the prompt for it.
+- When you generate media, you know exactly what it contains because you crafted prompt for it.
 - If a user asks to "make it bluer", "add a sunset", "change the style", or "update the image/video", you know the context and can create an updated version.
 
 MEDIA GENERATION RULES:
@@ -1195,7 +1195,7 @@ async def groq_chat_complete(messages: list, model: str = GROQ_FALLBACK_MODEL, m
 # REPLICATE API — MEDIA GENERATION
 # =========================
 async def create_replicate_prediction(model: str, input_data: dict) -> Dict:
-    """Create a Replicate prediction and return the result (polling until complete)"""
+    """Create a Replicate prediction and return result (polling until complete)"""
     if not REPLICATE_API_TOKEN:
         raise HTTPException(500, "Replicate API Token not configured. Media generation unavailable.")
 
@@ -1299,7 +1299,7 @@ async def generate_music_cover_minimax(prompt: str, reference_audio_url: str = N
 # MEDIA CONTEXT SYSTEM
 # =========================
 def store_media_context(conv_id: str, media_type: str, url: str, prompt: str, description: str):
-    """Store a media generation in the context store so the AI remembers it"""
+    """Store a media generation in context store so AI remembers it"""
     if conv_id not in _media_context_store:
         _media_context_store[conv_id] = []
     entry = {
@@ -1321,7 +1321,7 @@ def get_media_context(conv_id: str) -> List[Dict[str, Any]]:
 
 
 def get_latest_media(conv_id: str, media_type: str = None) -> Optional[Dict[str, Any]]:
-    """Get the most recent media item, optionally filtered by type"""
+    """Get most recent media item, optionally filtered by type"""
     items = _media_context_store.get(conv_id, [])
     if not items: return None
     if media_type:
@@ -1623,7 +1623,7 @@ async def unified_chat_complete(messages: list, model: str = PRIMARY_LLM_MODEL,
 # =========================
 async def build_media_prompt(user_prompt: str, media_type: str, conv_id: str = None,
                               modifier_context: str = "") -> str:
-    """Use the LLM to craft an optimized prompt for media generation"""
+    """Use LLM to craft an optimized prompt for media generation"""
     media_context = build_media_context_prompt(conv_id) if conv_id else ""
 
     system = f"""You are an expert {media_type} prompt engineer. Your job is to take the user's request and create an optimized, detailed prompt for an AI {media_type} generator.
@@ -1634,7 +1634,7 @@ Rules:
 - For images: describe visual elements, art style, colors, camera angle
 - For videos: describe motion, scene progression, timing, visual style
 - For music: describe genre, instruments, tempo, mood, key, arrangement
-- Keep the prompt focused and under 200 words
+- Keep prompt focused and under 200 words
 - Output ONLY the prompt text, nothing else
 {media_context}
 {modifier_context}"""
@@ -1900,7 +1900,7 @@ async def ask_universal(req: Request, res: Response):
             task = asyncio.current_task()
             active_streams[user["id"]] = task
             try:
-                # Find the most recent media to modify
+                # Find most recent media to modify
                 latest = get_latest_media(conv_id)
                 if not latest:
                     yield sse({"type": "status", "message": "No previous media found. Creating new..."})
@@ -2008,7 +2008,7 @@ Create a NEW prompt that incorporates the user's modifications into the original
             task = asyncio.current_task()
             active_streams[user["id"]] = task
             try:
-                yield sse({"type": "status", "message": "Searching the web..."})
+                yield sse({"type": "status", "message": "Searching web..."})
                 search_results = await search_google(prompt)
                 media_ctx = build_media_context_prompt(conv_id)
                 if not search_results:
@@ -2138,391 +2138,47 @@ async def generate_video_endpoint(req: Request, res: Response):
     """Dedicated video generation endpoint using Google Veo 3.1 Lite"""
     body = await req.json()
     prompt = body.get("prompt", "")
-    aspect_ratio
-                        "parent_id": parent_id,
-                    "status": "completed"
-                }
-                store_generation(conv_id, gen_data)
-                asyncio.create_task(save_generation_to_db(user["id"], conv_id, gen_data))
+    aspect_ratio = body.get("aspect_ratio", "16:9")
+    conv_id = body.get("conversation_id")
+    user = await get_user(req, res)
 
-                yield sse({"type": "generation", "data": {
-                    "id": gen_id, "type": "image", "url": image_url,
-                    "urls": image_urls, "description": description,
-                    "prompt_used": enhanced_prompt, "is_update": True,
-                    "parent_id": parent_id
-                }})
+    if not prompt: raise HTTPException(400, "Prompt required")
 
-                # Analyze the updated image
-                vision_description = description
-                if image_url:
-                    try:
-                        vision_description = await gemini_vision_analyze_url(image_url, "Describe this updated AI-generated image in detail.")
-                        gen_data["description"] = vision_description
-                        if conv_id in _generation_context:
-                            for g in _generation_context[conv_id]:
-                                if g["id"] == gen_id: g["description"] = vision_description; break
-                    except: pass
+    video_prompt = await build_media_prompt(prompt, "video", conv_id)
+    result = await generate_video_veo(video_prompt, aspect_ratio=aspect_ratio)
 
-                ai_response = f"I've updated your image based on your request!\n\n"
-                if vision_description:
-                    ai_response += f"Updated image shows: {vision_description}\n\n"
-                ai_response += "Let me know if you'd like any more changes!"
-
-                for char in ai_response:
-                    if task.cancelled(): break
-                    yield sse({"type": "token", "text": char})
-                    await asyncio.sleep(0.001)
-
-                user_memory = user.get("memory", "")
-                new_memory = (user_memory + f"\n[Updated Image]: {prompt}")[-5000:]
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-                await save_message(user["id"], conv_id, "assistant", ai_response)
-
-                yield sse({"type": "done"})
-            except Exception as e:
-                logger.error(f"Image update error: {e}")
-                yield sse({"type": "error", "message": f"Image update failed: {str(e)}"})
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(image_update_gen(), media_type="text/event-stream")
-
-    # ==========================================
-    # VIDEO GENERATION (Google Veo 3.1 Lite)
-    # ==========================================
-    if action_type == ActionType.VIDEO:
-        async def video_gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                yield sse({"type": "status", "message": "Creating your video with Google Veo 3.1 Lite. This may take a few minutes..."})
-
-                enhanced_prompt, description = await build_enhanced_generation_prompt(prompt, "video", conv_id)
-
-                aspect = "16:9"
-                p_lower = prompt.lower()
-                if "portrait" in p_lower or "vertical" in p_lower or "9:16" in p_lower or "mobile" in p_lower:
-                    aspect = "9:16"
-                elif "square" in p_lower or "1:1" in p_lower:
-                    aspect = "1:1"
-
-                result = await generate_video_replicate(enhanced_prompt, aspect_ratio=aspect)
-                video_url = result.get("url", "")
-
-                gen_id = str(uuid.uuid4())
-                gen_data = {
-                    "id": gen_id, "type": "video", "model": REPLICATE_MODELS["video"],
-                    "prompt": prompt, "enhanced_prompt": enhanced_prompt,
-                    "output_url": video_url, "description": description,
-                    "metadata": {"aspect_ratio": aspect}, "status": "completed"
-                }
-                store_generation(conv_id, gen_data)
-                asyncio.create_task(save_generation_to_db(user["id"], conv_id, gen_data))
-
-                yield sse({"type": "generation", "data": {
-                    "id": gen_id, "type": "video", "url": video_url,
-                    "description": description, "prompt_used": enhanced_prompt
-                }})
-
-                ai_response = f"I've created your video! Here it is.\n\nDescription: {description}\n\nYou can ask me to modify or create a new variation anytime!"
-                for char in ai_response:
-                    if task.cancelled(): break
-                    yield sse({"type": "token", "text": char})
-                    await asyncio.sleep(0.001)
-
-                user_memory = user.get("memory", "")
-                new_memory = (user_memory + f"\n[Generated Video]: {prompt} -> {description}")[-5000:]
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-                await save_message(user["id"], conv_id, "assistant", ai_response)
-
-                yield sse({"type": "done"})
-            except Exception as e:
-                logger.error(f"Video generation error: {e}")
-                yield sse({"type": "error", "message": f"Video generation failed: {str(e)}"})
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(video_gen(), media_type="text/event-stream")
-
-    # ==========================================
-    # VIDEO UPDATE (modify previous video)
-    # ==========================================
-    if action_type == ActionType.VIDEO_UPDATE:
-        async def video_update_gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                last_gen = get_last_generation(conv_id, "video")
-                if not last_gen:
-                    yield sse({"type": "status", "message": "No previous video found. Creating a new one..."})
-                    enhanced_prompt, description = await build_enhanced_generation_prompt(prompt, "video", conv_id)
-                else:
-                    yield sse({"type": "status", "message": "Updating your video..."})
-                    update_context = f"Previous video: '{last_gen.get('enhanced_prompt', '')}' which shows: '{last_gen.get('description', '')}'. Update request: '{prompt}'"
-                    enhanced_prompt, description = await build_enhanced_generation_prompt(update_context, "video", conv_id, last_gen)
-
-                result = await generate_video_replicate(enhanced_prompt)
-                video_url = result.get("url", "")
-
-                gen_id = str(uuid.uuid4())
-                gen_data = {
-                    "id": gen_id, "type": "video", "model": REPLICATE_MODELS["video"],
-                    "prompt": prompt, "enhanced_prompt": enhanced_prompt,
-                    "output_url": video_url, "description": description,
-                    "metadata": {"is_update": True}, "parent_id": last_gen["id"] if last_gen else None,
-                    "status": "completed"
-                }
-                store_generation(conv_id, gen_data)
-                asyncio.create_task(save_generation_to_db(user["id"], conv_id, gen_data))
-
-                yield sse({"type": "generation", "data": {
-                    "id": gen_id, "type": "video", "url": video_url,
-                    "description": description, "is_update": True
-                }})
-
-                ai_response = f"I've updated your video! Description: {description}"
-                for char in ai_response:
-                    if task.cancelled(): break
-                    yield sse({"type": "token", "text": char})
-                    await asyncio.sleep(0.001)
-
-                await save_message(user["id"], conv_id, "assistant", ai_response)
-                yield sse({"type": "done"})
-            except Exception as e:
-                logger.error(f"Video update error: {e}")
-                yield sse({"type": "error", "message": f"Video update failed: {str(e)}"})
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(video_update_gen(), media_type="text/event-stream")
-
-    # ==========================================
-    # MUSIC GENERATION (MiniMax Music 2.6)
-    # ==========================================
-    if action_type == ActionType.AUDIO:
-        async def music_gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                yield sse({"type": "status", "message": "Composing your music with MiniMax Music 2.6..."})
-
-                enhanced_prompt, description = await build_enhanced_generation_prompt(prompt, "music", conv_id)
-                
-                # Extract lyrics if provided in the prompt
-                lyrics = ""
-                lyrics_match = re.search(r'lyrics[:\s]*["\']?(.+?)["\']?\s*$', prompt, re.IGNORECASE | re.DOTALL)
-                if lyrics_match:
-                    lyrics = lyrics_match.group(1)
-
-                result = await generate_music_replicate(enhanced_prompt, lyrics=lyrics)
-                audio_url = result.get("url", "")
-
-                gen_id = str(uuid.uuid4())
-                gen_data = {
-                    "id": gen_id, "type": "music", "model": REPLICATE_MODELS["music"],
-                    "prompt": prompt, "enhanced_prompt": enhanced_prompt,
-                    "output_url": audio_url, "description": description,
-                    "metadata": {"lyrics": lyrics}, "status": "completed"
-                }
-                store_generation(conv_id, gen_data)
-                asyncio.create_task(save_generation_to_db(user["id"], conv_id, gen_data))
-
-                yield sse({"type": "generation", "data": {
-                    "id": gen_id, "type": "music", "url": audio_url,
-                    "description": description, "prompt_used": enhanced_prompt
-                }})
-
-                ai_response = f"I've composed your music track!\n\nDescription: {description}\n\nWould you like me to create a cover version or modify it?"
-                for char in ai_response:
-                    if task.cancelled(): break
-                    yield sse({"type": "token", "text": char})
-                    await asyncio.sleep(0.001)
-
-                user_memory = user.get("memory", "")
-                new_memory = (user_memory + f"\n[Generated Music]: {prompt} -> {description}")[-5000:]
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-                await save_message(user["id"], conv_id, "assistant", ai_response)
-
-                yield sse({"type": "done"})
-            except Exception as e:
-                logger.error(f"Music generation error: {e}")
-                yield sse({"type": "error", "message": f"Music generation failed: {str(e)}"})
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(music_gen(), media_type="text/event-stream")
-
-    # ==========================================
-    # MUSIC COVER GENERATION (MiniMax Music Cover)
-    # ==========================================
-    if action_type == ActionType.MUSIC_COVER:
-        async def cover_gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                yield sse({"type": "status", "message": "Creating your music cover with MiniMax..."})
-
-                enhanced_prompt, description = await build_enhanced_generation_prompt(prompt, "music_cover", conv_id)
-
-                # Try to find a previous audio generation to use as reference
-                last_audio = get_last_generation(conv_id, "music")
-                ref_url = ""
-                if last_audio and last_audio.get("output_url"):
-                    ref_url = last_audio["output_url"]
-
-                result = await generate_music_cover_replicate(enhanced_prompt, reference_audio_url=ref_url)
-                audio_url = result.get("url", "")
-
-                gen_id = str(uuid.uuid4())
-                gen_data = {
-                    "id": gen_id, "type": "music_cover", "model": REPLICATE_MODELS["music_cover"],
-                    "prompt": prompt, "enhanced_prompt": enhanced_prompt,
-                    "output_url": audio_url, "description": description,
-                    "metadata": {"reference_url": ref_url}, "status": "completed"
-                }
-                store_generation(conv_id, gen_data)
-                asyncio.create_task(save_generation_to_db(user["id"], conv_id, gen_data))
-
-                yield sse({"type": "generation", "data": {
-                    "id": gen_id, "type": "music_cover", "url": audio_url, "description": description
-                }})
-
-                ai_response = f"Here's your music cover!\n\n{description}"
-                for char in ai_response:
-                    if task.cancelled(): break
-                    yield sse({"type": "token", "text": char})
-                    await asyncio.sleep(0.001)
-
-                await save_message(user["id"], conv_id, "assistant", ai_response)
-                yield sse({"type": "done"})
-            except Exception as e:
-                logger.error(f"Music cover error: {e}")
-                yield sse({"type": "error", "message": f"Music cover generation failed: {str(e)}"})
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(cover_gen(), media_type="text/event-stream")
-
-    # ==========================================
-    # MATH (Wolfram Alpha / LLM)
-    # ==========================================
-    if intent_result and intent_result.intent == IntentCategory.MATHEMATICAL:
-        async def math_gen():
-            yield sse({"type": "status", "message": "Calculating..."})
-            try:
-                result = await solve_math(prompt)
-                for char in result:
-                    yield sse({"type": "token", "text": char})
-                    await asyncio.sleep(0.005)
-                yield sse({"type": "done"})
-            except Exception as e:
-                yield sse({"type": "error", "message": str(e)})
-        return StreamingResponse(math_gen(), media_type="text/event-stream")
-
-    # ==========================================
-    # CODE EXECUTION (Judge0)
-    # ==========================================
-    if intent_result and intent_result.intent == IntentCategory.CODE_EXECUTION:
-        match = re.search(r"```(\w+)?\n(.*?)```", prompt, re.DOTALL)
-        code = match.group(2) if match else prompt
-        lang = match.group(1) if match and match.group(1) else "python"
-        
-        async def exec_gen():
-            yield sse({"type": "status", "message": f"Executing {lang} code..."})
-            try:
-                res = await execute_code(code, lang)
-                yield sse({"type": "exec_result", "data": res})
-                yield sse({"type": "done"})
-            except Exception as e:
-                yield sse({"type": "error", "message": str(e)})
-        return StreamingResponse(exec_gen(), media_type="text/event-stream")
-
-    # ==========================================
-    # RESEARCH (SerpApi)
-    # ==========================================
-    if intent_result and intent_result.intent == IntentCategory.RESEARCH:
-        async def research_gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                yield sse({"type": "status", "message": "Searching the web..."})
-                search_results = await search_google(prompt)
-                
-                system_prompt = get_system_prompt(prompt, conv_id)
-                user_memory = user.get("memory", "")
-                if user_memory:
-                    system_prompt += f"\n\nUser Context: {user_memory}"
-
-                if not search_results:
-                    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
-                else:
-                    research_system = system_prompt + "\n\nYou are a research assistant. Use these search results:\n\n" + search_results + "\n\nAnswer based on these results. Cite sources."
-                    messages = [{"role": "system", "content": research_system}, {"role": "user", "content": prompt}]
-                
-                full_text = ""
-                async for token in stream_gemini_chat(messages, system_prompt="", model=api_model):
-                    if task.cancelled(): break
-                    full_text += token
-                    yield sse({"type": "token", "text": token})
-                
-                new_memory = (user_memory + "\n" + full_text[-500:])[-5000:]
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-                await save_message(user["id"], conv_id, "assistant", full_text)
-                
-                yield sse({"type": "done"})
-            except Exception as e:
-                logger.error(f"Research Stream Error: {e}")
-                yield sse({"type": "error", "message": "Research failed."})
-            finally:
-                active_streams.pop(user["id"], None)
-        return StreamingResponse(research_gen(), media_type="text/event-stream")
-
-    # ==========================================
-    # GENERAL CHAT (Gemini 2.5 Pro 500B+)
-    # ==========================================
-    if stream:
-        async def event_gen():
-            task = asyncio.current_task()
-            active_streams[user["id"]] = task
-            try:
-                history = await get_history(conv_id) if conv_id else []
-                system_prompt = get_system_prompt(prompt, conv_id)
-                user_memory = user.get("memory", "")
-                if user_memory:
-                    system_prompt += f"\n\nUser Context: {user_memory}"
-                
-                full_history = [{"role": "system", "content": system_prompt}] + history
-                
-                full_text = ""
-                async for token in stream_gemini_chat(full_history, system_prompt="", model=api_model):
-                    if task.cancelled(): break
-                    full_text += token
-                    yield sse({"type": "token", "text": token})
-
-                new_memory = (user_memory + "\n" + full_text[-500:])[-5000:]
-                asyncio.create_task(update_user_memory(user["id"], new_memory))
-                await save_message(user["id"], conv_id, "assistant", full_text)
-                yield sse({"type": "done"})
-            
-            except Exception as e:
-                logger.error(f"Universal Stream Error: {e}")
-                yield sse({"type": "error", "message": "Processing failed."})
-            finally:
-                active_streams.pop(user["id"], None)
-
-        return StreamingResponse(event_gen(), media_type="text/event-stream")
+    if result["status"] == "succeeded":
+        output = result["output"]
+        video_url = output[0] if isinstance(output, list) else output
+        description = f"AI-generated video: {video_prompt}"
+        if conv_id: store_media_context(conv_id, "video", video_url, video_prompt, description)
+        return {"status": "succeeded", "url": video_url, "prompt": video_prompt, "description": description}
     else:
-        history = await get_history(conv_id)
-        system_prompt = get_system_prompt(prompt, conv_id)
-        user_memory = user.get("memory", "")
-        if user_memory: system_prompt += f"\n\nUser Context: {user_memory}"
-        full_history = [{"role": "system", "content": system_prompt}] + history
-        
-        reply = await gemini_generate(full_history, model=api_model)
-        new_memory = (user_memory + "\n" + reply[-500:])[-5000:]
-        asyncio.create_task(update_user_memory(user["id"], new_memory))
-        await save_message(user["id"], conv_id, "assistant", reply)
-        return {"reply": reply}
+        raise HTTPException(500, f"Video generation failed: {result.get('error', 'Unknown')}")
+
+
+@app.post("/generate/music")
+async def generate_music_endpoint(req: Request, res: Response):
+    """Dedicated music generation endpoint using MiniMax Music 2.6"""
+    body = await req.json()
+    prompt = body.get("prompt", "")
+    duration = body.get("duration", 30)
+    conv_id = body.get("conversation_id")
+    user = await get_user(req, res)
+
+    if not prompt: raise HTTPException(400, "Prompt required")
+
+    music_prompt = await build_media_prompt(prompt, "music", conv_id)
+    result = await generate_music_minimax(music_prompt, duration=duration)
+
+    if result["status"] == "succeeded":
+        output = result["output"]
+        audio_url = output[0] if isinstance(output, list) else output
+        description = f"AI-generated music: {music_prompt}"
+        if conv_id: store_media_context(conv_id, "audio", audio_url, music_prompt, description)
+        return {"status": "succeeded", "url": audio_url, "prompt": music_prompt, "description": description}
+    else:
+        raise HTTPException(500, f"Music generation failed: {result.get('error', 'Unknown')}")
 
 
 # =========================
@@ -2567,7 +2223,7 @@ async def handle_archive_analysis(result: FileExtractionResult, stream: bool):
                 yield sse({"type": "token", "text": token})
             yield sse({"type": "done"})
         return StreamingResponse(gen(), media_type="text/event-stream")
-    reply = await gemini_generate(messages)
+    reply = await gemini_chat_complete(messages)
     return {"analysis": reply, "metadata": result.metadata, "files": result.files}
 
 
@@ -2576,7 +2232,7 @@ async def handle_text_analysis(result: FileExtractionResult, stream: bool, file_
     filename = result.metadata.get("filename", "file.txt")
     prompt = f"Analyze file '{filename}':\n\n{result.content}"
     messages = [
-        {"role": "system", "content": get_system_prompt("") + " Analyze the uploaded file. Review code for errors, summarize docs, or describe data structure."},
+        {"role": "system", "content": get_system_prompt("") + " Analyze uploaded file. Review code for errors, summarize docs, or describe data structure."},
         {"role": "user", "content": prompt}
     ]
     if stream:
@@ -2586,7 +2242,7 @@ async def handle_text_analysis(result: FileExtractionResult, stream: bool, file_
                 yield sse({"type": "token", "text": token})
             yield sse({"type": "done"})
         return StreamingResponse(gen(), media_type="text/event-stream")
-    reply = await gemini_generate(messages)
+    reply = await gemini_chat_complete(messages)
     return {"analysis": reply, "metadata": file_metadata, "content": result.content}
 
 
@@ -2601,13 +2257,13 @@ async def handle_image_analysis(content: bytes, filename: str, stream: bool):
     if stream:
         async def gen():
             yield sse({"type": "file_metadata", "metadata": metadata})
-            analysis = await gemini_vision_analyze(content, mime_type)
+            analysis = await gemini_vision_analyze(base64.b64encode(content).decode(), mime_type)
             for char in analysis:
                 yield sse({"type": "token", "text": char})
                 await asyncio.sleep(0.001)
             yield sse({"type": "done"})
         return StreamingResponse(gen(), media_type="text/event-stream")
-    analysis = await gemini_vision_analyze(content, mime_type)
+    analysis = await gemini_vision_analyze(base64.b64encode(content).decode(), mime_type)
     return JSONResponse(content={"content": analysis, "metadata": metadata})
 
 
@@ -2739,7 +2395,7 @@ def health():
         "status": "healthy",
         "version": "3.0.0-Ultra",
         "services": {
-            "google_gemini_500b": bool(GOOGLE_AI_API_KEY),
+            "google_gemini_500b": bool(GOOGLE_API_KEY),
             "groq_gemma_27b": bool(GROQ_API_KEY),
             "replicate_flux2_max": bool(REPLICATE_API_TOKEN),
             "replicate_veo_31": bool(REPLICATE_API_TOKEN),
@@ -2752,10 +2408,10 @@ def health():
         "models": {
             "primary_llm": PRIMARY_LLM_MODEL,
             "fast_llm": FAST_LLM_MODEL,
-            "image_gen": REPLICATE_MODELS["image"],
-            "video_gen": REPLICATE_MODELS["video"],
-            "music_gen": REPLICATE_MODELS["music"],
-            "music_cover": REPLICATE_MODELS["music_cover"],
+            "image_gen": REPLICATE_IMAGE_MODEL,
+            "video_gen": REPLICATE_VIDEO_MODEL,
+            "music_gen": REPLICATE_MUSIC_MODEL,
+            "music_cover": REPLICATE_MUSIC_COVER_MODEL,
         }
     }
 
