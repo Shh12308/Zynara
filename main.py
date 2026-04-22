@@ -60,7 +60,7 @@ PRIMARY_LLM_MODEL = GEMINI_PRO_MODEL if GOOGLE_API_KEY else GROQ_FALLBACK_MODEL
 FAST_LLM_MODEL = GEMINI_FLASH_MODEL if GOOGLE_API_KEY else GROQ_FALLBACK_MODEL
 CODE_MODEL = GEMINI_FLASH_MODEL if GOOGLE_API_KEY else GROQ_FALLBACK_MODEL
 
-# Replicate model IDs
+# Replicate model IDs (Mapped exactly to user request)
 REPLICATE_VIDEO_MODEL = "google/veo-3.1-lite"
 REPLICATE_IMAGE_MODEL = "black-forest-labs/flux-2-max"
 REPLICATE_MUSIC_MODEL = "minimax/music-2.6"
@@ -77,16 +77,32 @@ MODEL_ALIASES = {
     "google": GEMINI_PRO_MODEL,
     "chatgpt": "gpt-4o-mini",
     "chat.z": "llama-3.1-70b-versatile",
+    # Explicit mappings for the requested premium models
+    "flux-2-max": REPLICATE_IMAGE_MODEL,
+    "veo-3.1-lite": REPLICATE_VIDEO_MODEL,
+    "minimax-music": REPLICATE_MUSIC_MODEL,
+    "minimax-cover": REPLICATE_MUSIC_COVER_MODEL
 }
 
 
 def resolve_model(model_name: Optional[str]) -> str:
     if not model_name:
         return PRIMARY_LLM_MODEL
+    
     normalized = model_name.lower().strip()
+    
+    # 1. Check Aliases
     if normalized in MODEL_ALIASES:
         return MODEL_ALIASES[normalized]
-    return model_name
+    
+    # 2. If it matches specific advanced model names, allow passthrough
+    # This ensures frontend can send "flux-2-max" directly
+    advanced_models = ["flux-2-max", "veo-3.1-lite", "minimax-music", "minimax-cover"]
+    if any(m in normalized for m in advanced_models):
+        return model_name # Pass through exactly as requested
+        
+    # 3. Default Fallback
+    return PRIMARY_LLM_MODEL
 
 
 def is_gemini_model(model: str) -> bool:
@@ -130,10 +146,8 @@ _session_cache_ttl = 300
 _session_cache_last_cleanup = time.time()
 
 # =========================
-# MEDIA CONTEXT STORE
+# MEDIA CONTEXT STORE (All-Knowing)
 # =========================
-# In-memory store of recent media generations per conversation
-# Key: conversation_id, Value: list of media dicts
 _media_context_store: Dict[str, List[Dict[str, Any]]] = {}
 
 try:
@@ -141,7 +155,6 @@ try:
 except ImportError:
     wolframalpha = None
     logger.warning("wolframalpha library not installed. Math features will fallback to LLM.")
-
 
 # =========================
 # FILE TYPE DEFINITIONS
@@ -218,7 +231,6 @@ CONFIG_EXTENSIONS = {
     '.prettierrc', '.gitignore', '.dockerignore', '.npmrc',
 }
 
-
 def get_file_category(filename: str) -> FileCategory:
     if not filename:
         return FileCategory.UNKNOWN
@@ -261,7 +273,7 @@ def get_file_language(filename: str) -> Optional[str]:
 
 def is_binary_file(filename: str, content: bytes = None) -> bool:
     ext = Path(filename).suffix.lower()
-    binary_exts = IMAGE_EXTENSIONS | AUDIO_EXTENSIONS | VIDEO_EXTENSIONS | {
+    binary_exts = IMAGE_EXTENSIONS | AUDIO_EXTENSIONS | VIDEO_EXTENSIONS | ARCHIVE_EXTENSIONS | {
         '.exe', '.dll', '.so', '.dylib', '.bin', '.dat',
         '.pyc', '.pyo', '.class', '.o', '.obj', '.a', '.lib',
         '.zip', '.tar', '.gz', '.7z', '.rar',
@@ -288,7 +300,7 @@ def format_file_size(size_bytes: int) -> str:
 
 
 # =========================
-# FILE EXTRACTOR (kept for brevity)
+# FILE EXTRACTOR
 # =========================
 class FileExtractionResult:
     def __init__(self, content: str, files: List[Dict[str, Any]] = None,
@@ -338,6 +350,7 @@ async def extract_file_content(content: bytes, filename: str, max_length: int = 
                 metadata=metadata, original_size=original_size)
         if filename.lower().endswith('.pdf'):
             return await extract_pdf_content(content, filename, max_length, metadata)
+        
         text, truncated = extract_text_with_fallback(content, max_length)
         metadata["line_count"] = text.count('\n') + 1
         return FileExtractionResult(content=text, metadata=metadata, truncated=truncated, original_size=original_size)
@@ -755,7 +768,7 @@ class AdvancedIntentDetector:
             ],
             IntentCategory.DATA_ANALYSIS: [
                 r'\b(analyze|analysis|analyse)\s+(this|the|my|some)\s+(data|dataset|csv|excel|spreadsheet|json)',
-                r'\b(statistics?|statistical)\s+(analysis|test|summary)',
+                r'\b(statistics?|statistical)\s+(analysis|test|summary|overview)',
                 r'\b(insights?\s+(from|in|about|into))',
                 r'\b(eda|exploratory\s+data\s+analysis)',
             ],
@@ -1118,10 +1131,12 @@ async def gemini_vision_analyze(image_base64: str, mime_type: str, prompt: str =
         return "Vision analysis unavailable — Google API key not configured."
 
     payload = {
-        "contents": [{"role": "user", "parts": [
-            {"text": prompt},
-            {"inlineData": {"mimeType": mime_type, "data": image_base64}}
-        ]}],
+        "contents": [{
+            "role": "user", "parts": [
+                {"text": prompt},
+                {"inlineData": {"mimeType": mime_type, "data": image_base64}}
+            ]
+        }],
         "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2048}
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_PRO_MODEL}:generateContent?key={GOOGLE_API_KEY}"
@@ -1240,8 +1255,7 @@ async def create_replicate_prediction(model: str, input_data: dict) -> Dict:
                     # still processing — continue polling
                 else:
                     logger.warning(f"Replicate poll error: {poll_r.status_code}")
-
-            return {"status": "timeout", "id": prediction_id, "error": "Generation timed out"}
+                    return {"status": "timeout", "id": prediction_id, "error": "Generation timed out"}
 
         elif r.status_code == 200:
             # Some responses come as 200 directly
@@ -1296,7 +1310,7 @@ async def generate_music_cover_minimax(prompt: str, reference_audio_url: str = N
 
 
 # =========================
-# MEDIA CONTEXT SYSTEM
+# MEDIA CONTEXT SYSTEM (ALL-KNOWING)
 # =========================
 def store_media_context(conv_id: str, media_type: str, url: str, prompt: str, description: str):
     """Store a media generation in context store so AI remembers it"""
@@ -1521,7 +1535,8 @@ async def get_user(request: Request, response: Response, remember: Optional[bool
         try:
             user_resp = await _execute_supabase_with_retry(
                 supabase.table("users").select("*").eq("id", user_id).limit(1),
-                description="User Lookup by ID")
+                description="User Lookup by ID"
+            )
             if user_resp.data:
                 u = user_resp.data[0]
                 user_obj = {"id": u["id"], "email": u.get("email"), "memory": u.get("memory", ""),
@@ -1533,7 +1548,8 @@ async def get_user(request: Request, response: Response, remember: Optional[bool
                     try:
                         await _execute_supabase_with_retry(
                             supabase.table("users").update({"fingerprint": current_fingerprint}).eq("id", user_id),
-                            description="Update Fingerprint")
+                            description="Update Fingerprint"
+                        )
                     except: pass
                 if not user_obj["session_valid"]:
                     new_token = await create_user_session(user_id, current_fingerprint, remember)
@@ -1551,6 +1567,7 @@ async def get_user(request: Request, response: Response, remember: Optional[bool
                 {"id": new_id, "email": f"anon+{new_id[:8]}@local", "memory": "", "fingerprint": current_fingerprint},
                 on_conflict="id"),
             description="Create Anonymous User")
+        )
         user_obj["id"] = new_id
     except Exception as e:
         logger.error(f"Failed to create anonymous user: {e}")
@@ -1567,7 +1584,8 @@ async def update_user_memory(user_id: str, new_memory: str):
     try:
         await _execute_supabase_with_retry(
             supabase.table("users").update({"memory": new_memory}).eq("id", user_id),
-            description="Update User Memory")
+            description="Update User Memory"
+        )
         if user_id in _session_cache: _session_cache[user_id]["memory"] = new_memory
     except Exception as e:
         logger.error(f"Failed to update user memory: {e}")
@@ -1576,21 +1594,32 @@ async def update_user_memory(user_id: str, new_memory: str):
 async def get_history(conv_id: str) -> list:
     try:
         result = await _execute_supabase_with_retry(
-            supabase.table("messages").select("role, content")
+            supabase.table("messages").select("role, content, content_type")
             .eq("conversation_id", conv_id).order("created_at", desc=False).limit(30),
-            description="Fetch History")
-        if result.data: return [{"role": m["role"], "content": m["content"]} for m in result.data]
+            description="Fetch History"
+        )
+        if result.data: 
+            return [{"role": m["role"], "content": m["content"], "content_type": m.get("content_type", "text")} for m in result.data]
         return []
-    except: return []
+    except: 
+        return []
 
 
-async def save_message(user_id: str, conv_id: str, role: str, content: str):
+async def save_message(user_id: str, conv_id: str, role: str, content: str, metadata: dict = None):
     try:
+        payload = {
+            "id": str(uuid.uuid4()), 
+            "conversation_id": conv_id, 
+            "role": role, 
+            "content": content,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        if metadata: payload["metadata"] = json.dumps(metadata)
+        
         await _execute_supabase_with_retry(
-            supabase.table("messages").insert({
-                "id": str(uuid.uuid4()), "conversation_id": conv_id, "role": role,
-                "content": content, "created_at": datetime.now(timezone.utc).isoformat()
-            }), description="Save Message")
+            supabase.table("messages").insert(payload),
+            description="Save Message"
+        )
     except Exception as e:
         logger.error(f"Failed to save message: {e}")
 
@@ -1701,7 +1730,8 @@ async def ask_universal(req: Request, res: Response):
     if conv_id:
         check = await _execute_supabase_with_retry(
             supabase.table("conversations").select("id").eq("id", conv_id).limit(1),
-            description="Check Conversation")
+            description="Check Conversation"
+        )
         if check.data: conversation_exists = True
         else: conv_id = str(uuid.uuid4())
     if not conv_id: conv_id = str(uuid.uuid4())
@@ -1768,16 +1798,23 @@ async def ask_universal(req: Request, res: Response):
                     description = f"AI-generated image: {image_prompt}"
                     store_media_context(conv_id, "image", image_url, image_prompt, description)
 
-                    # Generate a description of what was created
-                    desc_msg = f"I've generated an image for you! The prompt was: \"{image_prompt}\"\n\n![Generated Image]({image_url})"
-                    yield sse({"type": "media", "media_type": "image", "url": image_url,
-                               "prompt": image_prompt, "description": description})
+                    # Emit Media Event (Frontend expects 'type': 'media')
+                    yield sse({
+                        "type": "media", 
+                        "media_type": "image", 
+                        "url": image_url,
+                        "prompt": image_prompt,
+                        "description": description
+                    })
+
+                    # Then stream text explanation
+                    desc_msg = f"I've generated an image for you! The prompt was: \"{image_prompt}\"\n\n"
                     for char in desc_msg:
                         if task.cancelled(): break
                         yield sse({"type": "token", "text": char})
                         await asyncio.sleep(0.005)
-                    await save_message(user["id"], conv_id, "assistant",
-                                       f"[IMAGE GENERATED] Prompt: {image_prompt}\nURL: {image_url}\n{desc_msg}")
+                    
+                    await save_message(user["id"], conv_id, "assistant", desc_msg + image_url)
                 else:
                     error = result.get("error", "Unknown error")
                     yield sse({"type": "error", "message": f"Image generation failed: {error}"})
@@ -1805,15 +1842,22 @@ async def ask_universal(req: Request, res: Response):
                     description = f"AI-generated video: {video_prompt}"
                     store_media_context(conv_id, "video", video_url, video_prompt, description)
 
-                    desc_msg = f"I've generated a video for you! The prompt was: \"{video_prompt}\"\n\n[Watch Video]({video_url})"
-                    yield sse({"type": "media", "media_type": "video", "url": video_url,
-                               "prompt": video_prompt, "description": description})
+                    # Emit Media Event
+                    yield sse({
+                        "type": "media", 
+                        "media_type": "video", 
+                        "url": video_url,
+                        "prompt": video_prompt,
+                        "description": description
+                    })
+
+                    desc_msg = f"I've generated a video for you! The prompt was: \"{video_prompt}\"\n\n"
                     for char in desc_msg:
                         if task.cancelled(): break
                         yield sse({"type": "token", "text": char})
                         await asyncio.sleep(0.005)
-                    await save_message(user["id"], conv_id, "assistant",
-                                       f"[VIDEO GENERATED] Prompt: {video_prompt}\nURL: {video_url}\n{desc_msg}")
+
+                    await save_message(user["id"], conv_id, "assistant", desc_msg + video_url)
                 else:
                     yield sse({"type": "error", "message": f"Video generation failed: {result.get('error', 'Unknown')}"})
                 yield sse({"type": "done"})
@@ -1840,15 +1884,22 @@ async def ask_universal(req: Request, res: Response):
                     description = f"AI-generated music: {music_prompt}"
                     store_media_context(conv_id, "audio", audio_url, music_prompt, description)
 
-                    desc_msg = f"I've generated music for you! The prompt was: \"{music_prompt}\"\n\n[Listen]({audio_url})"
-                    yield sse({"type": "media", "media_type": "audio", "url": audio_url,
-                               "prompt": music_prompt, "description": description})
+                    # Emit Media Event
+                    yield sse({
+                        "type": "media", 
+                        "media_type": "audio", 
+                        "url": audio_url,
+                        "prompt": music_prompt,
+                        "description": description
+                    })
+
+                    desc_msg = f"I've generated music for you! The prompt was: \"{music_prompt}\"\n\n"
                     for char in desc_msg:
                         if task.cancelled(): break
                         yield sse({"type": "token", "text": char})
                         await asyncio.sleep(0.005)
-                    await save_message(user["id"], conv_id, "assistant",
-                                       f"[MUSIC GENERATED] Prompt: {music_prompt}\nURL: {audio_url}\n{desc_msg}")
+
+                    await save_message(user["id"], conv_id, "assistant", desc_msg + audio_url)
                 else:
                     yield sse({"type": "error", "message": f"Music generation failed: {result.get('error', 'Unknown')}"})
                 yield sse({"type": "done"})
@@ -1875,15 +1926,22 @@ async def ask_universal(req: Request, res: Response):
                     description = f"AI-generated music cover: {cover_prompt}"
                     store_media_context(conv_id, "music_cover", audio_url, cover_prompt, description)
 
-                    desc_msg = f"I've generated a music cover for you! Prompt: \"{cover_prompt}\"\n\n[Listen]({audio_url})"
-                    yield sse({"type": "media", "media_type": "music_cover", "url": audio_url,
-                               "prompt": cover_prompt, "description": description})
+                    # Emit Media Event
+                    yield sse({
+                        "type": "media", 
+                        "media_type": "audio", 
+                        "url": audio_url,
+                        "prompt": cover_prompt,
+                        "description": description
+                    })
+
+                    desc_msg = f"I've generated a music cover for you! Prompt: \"{cover_prompt}\"\n\n"
                     for char in desc_msg:
                         if task.cancelled(): break
                         yield sse({"type": "token", "text": char})
                         await asyncio.sleep(0.005)
-                    await save_message(user["id"], conv_id, "assistant",
-                                       f"[MUSIC COVER GENERATED] Prompt: {cover_prompt}\nURL: {audio_url}")
+
+                    await save_message(user["id"], conv_id, "assistant", desc_msg + audio_url)
                 else:
                     yield sse({"type": "error", "message": f"Music cover generation failed: {result.get('error', 'Unknown')}"})
                 yield sse({"type": "done"})
@@ -1903,9 +1961,8 @@ async def ask_universal(req: Request, res: Response):
                 # Find most recent media to modify
                 latest = get_latest_media(conv_id)
                 if not latest:
-                    yield sse({"type": "status", "message": "No previous media found. Creating new..."})
-                    # Fall through to create new based on what they want
-                    # Detect what type they want from the prompt
+                    # If no media to modify, treat as new gen request based on keywords
+                    # Check intent again just in case
                     sub_intent = detect_intent(prompt)
                     if sub_intent and sub_intent.intent == IntentCategory.VIDEO_GENERATION:
                         modified_prompt = await build_media_prompt(prompt, "video", conv_id)
@@ -1914,6 +1971,7 @@ async def ask_universal(req: Request, res: Response):
                         modified_prompt = await build_media_prompt(prompt, "music", conv_id)
                         result = await generate_music_minimax(modified_prompt)
                     else:
+                        # Default to image
                         modified_prompt = await build_media_prompt(prompt, "image", conv_id)
                         result = await generate_image_flux(modified_prompt)
                 else:
@@ -1947,20 +2005,27 @@ Create a NEW prompt that incorporates the user's modifications into the original
                 if result["status"] == "succeeded":
                     output = result["output"]
                     media_url = output[0] if isinstance(output, list) else output
-                    actual_type = media_type if latest else "image"
+                    actual_type = media_type if media_type != "image_analyzed" else "image"
                     description = f"Updated {actual_type}: {modified_prompt}"
                     store_media_context(conv_id, actual_type, media_url, modified_prompt, description)
 
-                    yield sse({"type": "media", "media_type": actual_type, "url": media_url,
-                               "prompt": modified_prompt, "description": description,
-                               "is_update": True})
-                    desc_msg = f"I've updated your {actual_type}! New prompt: \"{modified_prompt}\"\n\n![Updated {actual_type}]({media_url})"
+                    # Emit Media Update Event
+                    yield sse({
+                        "type": "media", 
+                        "media_type": actual_type, 
+                        "url": media_url,
+                        "prompt": modified_prompt,
+                        "description": description,
+                        "is_update": True
+                    })
+
+                    desc_msg = f"I've updated your {actual_type}! New prompt: \"{modified_prompt}\"\n\n"
                     for char in desc_msg:
                         if task.cancelled(): break
                         yield sse({"type": "token", "text": char})
                         await asyncio.sleep(0.005)
-                    await save_message(user["id"], conv_id, "assistant",
-                                       f"[{actual_type.upper()} UPDATED] Prompt: {modified_prompt}\nURL: {media_url}")
+
+                    await save_message(user["id"], conv_id, "assistant", desc_msg + media_url)
                 else:
                     yield sse({"type": "error", "message": f"Media update failed: {result.get('error', 'Unknown')}"})
                 yield sse({"type": "done"})
@@ -2012,6 +2077,7 @@ Create a NEW prompt that incorporates the user's modifications into the original
                 search_results = await search_google(prompt)
                 media_ctx = build_media_context_prompt(conv_id)
                 if not search_results:
+                    # Fallback if search fails or no key
                     system_prompt = get_system_prompt(prompt) + "\n\nYou are a helpful research assistant." + media_ctx
                     user_memory = user.get("memory", "")
                     if user_memory: system_prompt += f"\n\nUser Context: {user_memory}"
@@ -2022,6 +2088,10 @@ Create a NEW prompt that incorporates the user's modifications into the original
                         if task.cancelled(): break
                         full_text += token
                         yield sse({"type": "token", "text": token})
+                    
+                    new_memory = (user_memory + "\n" + full_text[-500:])[-5000:]
+                    asyncio.create_task(update_user_memory(user["id"], new_memory))
+                    await save_message(user["id"], conv_id, "assistant", full_text)
                 else:
                     system_prompt = get_system_prompt(prompt) + f"""
 
@@ -2039,9 +2109,10 @@ Answer the user's question based on these results. Cite sources if possible.""" 
                         full_text += token
                         yield sse({"type": "token", "text": token})
 
-                new_memory = (user.get("memory", "") + "\n" + full_text[-500:])[-5000:]
+                new_memory = (user_memory + "\n" + full_text[-500:])[-5000:]
                 asyncio.create_task(update_user_memory(user["id"], new_memory))
                 await save_message(user["id"], conv_id, "assistant", full_text)
+                
                 yield sse({"type": "done"})
             except Exception as e:
                 logger.error(f"Research stream error: {e}")
@@ -2098,6 +2169,7 @@ Answer the user's question based on these results. Cite sources if possible.""" 
         if user_memory: base_system += f"\n\nUser Context: {user_memory}"
         media_ctx = build_media_context_prompt(conv_id)
         if media_ctx: base_system += media_ctx
+        
         full_history = [{"role": "system", "content": base_system}] + history
         reply = await unified_chat_complete(full_history, model=api_model, system_prompt=base_system)
         new_memory = (user_memory + "\n" + reply[-500:])[-5000:] if user_memory else reply[-1000:]
@@ -2176,7 +2248,7 @@ async def generate_music_endpoint(req: Request, res: Response):
         audio_url = output[0] if isinstance(output, list) else output
         description = f"AI-generated music: {music_prompt}"
         if conv_id: store_media_context(conv_id, "audio", audio_url, music_prompt, description)
-        return {"status": "succeeded", "url": audio_url, "prompt": music_prompt, "description": description}
+        return {"status": "supports", "url": audio_url, "prompt": music_prompt, "description": description}
     else:
         raise HTTPException(500, f"Music generation failed: {result.get('error', 'Unknown')}")
 
@@ -2216,6 +2288,7 @@ async def handle_archive_analysis(result: FileExtractionResult, stream: bool):
         {"role": "system", "content": get_system_prompt("") + "\n\nAnalyze this archive file. Describe structure, purpose, and highlight important files."},
         {"role": "user", "content": full_content}
     ]
+    
     if stream:
         async def gen():
             yield sse({"type": "file_metadata", "metadata": result.metadata, "files": result.files})
@@ -2223,6 +2296,7 @@ async def handle_archive_analysis(result: FileExtractionResult, stream: bool):
                 yield sse({"type": "token", "text": token})
             yield sse({"type": "done"})
         return StreamingResponse(gen(), media_type="text/event-stream")
+    
     reply = await gemini_chat_complete(messages)
     return {"analysis": reply, "metadata": result.metadata, "files": result.files}
 
@@ -2231,10 +2305,12 @@ async def handle_text_analysis(result: FileExtractionResult, stream: bool, file_
     if file_metadata is None: file_metadata = result.metadata
     filename = result.metadata.get("filename", "file.txt")
     prompt = f"Analyze file '{filename}':\n\n{result.content}"
+    
     messages = [
         {"role": "system", "content": get_system_prompt("") + " Analyze uploaded file. Review code for errors, summarize docs, or describe data structure."},
         {"role": "user", "content": prompt}
     ]
+    
     if stream:
         async def gen():
             yield sse({"type": "file_metadata", "metadata": file_metadata})
@@ -2242,6 +2318,7 @@ async def handle_text_analysis(result: FileExtractionResult, stream: bool, file_
                 yield sse({"type": "token", "text": token})
             yield sse({"type": "done"})
         return StreamingResponse(gen(), media_type="text/event-stream")
+    
     reply = await gemini_chat_complete(messages)
     return {"analysis": reply, "metadata": file_metadata, "content": result.content}
 
@@ -2263,6 +2340,7 @@ async def handle_image_analysis(content: bytes, filename: str, stream: bool):
                 await asyncio.sleep(0.001)
             yield sse({"type": "done"})
         return StreamingResponse(gen(), media_type="text/event-stream")
+    
     analysis = await gemini_vision_analyze(base64.b64encode(content).decode(), mime_type)
     return JSONResponse(content={"content": analysis, "metadata": metadata})
 
@@ -2409,7 +2487,7 @@ def health():
             "primary_llm": PRIMARY_LLM_MODEL,
             "fast_llm": FAST_LLM_MODEL,
             "image_gen": REPLICATE_IMAGE_MODEL,
-            "video_gen": REPLICATE_VIDEO_MODEL,
+            "video_gen": Replicate_VIDEO_MODEL,
             "music_gen": REPLICATE_MUSIC_MODEL,
             "music_cover": REPLICATE_MUSIC_COVER_MODEL,
         }
