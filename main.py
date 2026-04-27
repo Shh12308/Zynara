@@ -12,6 +12,8 @@ import tempfile
 import mimetypes
 import shutil
 import time
+import cv2  # NEW: For video processing
+import numpy as np  # NEW: For video processing
 from io import BytesIO
 from enum import Enum
 from dataclasses import dataclass, field
@@ -19,7 +21,7 @@ from typing import Optional, Dict, Any, List, Union, Tuple
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Response, HTTPException, Depends, UploadFile, File, Cookie, Header
+from fastapi import FastAPI, Request, Response, HTTPException, Depends, UploadFile, File, Cookie, Header, Form
 from fastapi.responses import StreamingResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, validator
@@ -127,7 +129,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
 app = FastAPI(
     title="HeloXAI API",
     description="Advanced AI Assistant Backend — Multi-Modal, Media-Aware",
-    version="3.0.0-GeminiMedia"
+    version="3.1.0-VideoAnalysis"
 )
 
 app.add_middleware(
@@ -298,6 +300,82 @@ def format_file_size(size_bytes: int) -> str:
         size_bytes /= 1024.0
     return f"{size_bytes:.1f} TB"
 
+
+# =========================
+# VIDEO PROCESSING HELPERS (NEW)
+# =========================
+def get_video_duration(video_bytes: bytes) -> float:
+    """
+    Returns the duration of the video in seconds using OpenCV.
+    Writes bytes to a temp file for reliable reading.
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+        tmp_file.write(video_bytes)
+        tmp_file_path = tmp_file.name
+    
+    try:
+        cap = cv2.VideoCapture(tmp_file_path)
+        if not cap.isOpened():
+            raise ValueError("Could not open video file")
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        cap.release()
+        
+        if fps == 0:
+            return 0.0 # Prevent division by zero
+            
+        duration = frame_count / fps
+        return duration
+    finally:
+        # Clean up temp file
+        if os.path.exists(tmp_file_path):
+            os.remove(tmp_file_path)
+
+def extract_video_frames(video_bytes: bytes, max_frames: int = 4) -> List[str]:
+    """
+    Extracts base64 encoded frames from video bytes.
+    Returns a list of base64 strings (jpeg format).
+    """
+    frames_b64 = []
+    
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_file:
+        tmp_file.write(video_bytes)
+        tmp_file_path = tmp_file.name
+    
+    try:
+        cap = cv2.VideoCapture(tmp_file_path)
+        if not cap.isOpened():
+            return []
+            
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames == 0:
+            return []
+
+        # Calculate indices to sample (evenly distributed)
+        indices = [int(i * total_frames / max_frames) for i in range(max_frames)]
+        
+        for frame_idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if ret:
+                # Convert BGR (OpenCV default) to RGB
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Encode to JPEG bytes
+                _, buffer = cv2.imencode('.jpg', frame_rgb)
+                frame_b64 = base64.b64encode(buffer).decode('utf-8')
+                frames_b64.append(frame_b64)
+                
+        cap.release()
+        return frames_b64
+    except Exception as e:
+        logger.error(f"Error extracting video frames: {e}")
+        return []
+    finally:
+        if os.path.exists(tmp_file_path):
+            os.remove(tmp_file_path)
 
 # =========================
 # FILE EXTRACTOR
@@ -583,11 +661,11 @@ You are MULTIMODAL and MEDIA-AWARE:
 - If a user asks to "make it bluer", "add a sunset", "change the style", or "update the image/video", you know the context and can create an updated version.
 
 MEDIA GENERATION RULES:
-- For IMAGE requests: You will generate a detailed image prompt and the system will create it with Flux 2 Max.
-- For VIDEO requests: You will generate a detailed video prompt and the system will create it with Google Veo 3.1 Lite.
-- For MUSIC requests: You will generate a detailed music prompt and the system will create it with MiniMax Music 2.6.
-- For MUSIC COVER requests: You will generate a prompt and the system will use MiniMax Music Cover.
-- Always describe what you're generating so the user knows what to expect.
+- For IMAGE requests: You will generate a detailed image prompt and system will create it with Flux 2 Max.
+- For VIDEO requests: You will generate a detailed video prompt and system will create it with Google Veo 3.1 Lite.
+- For MUSIC requests: You will generate a detailed music prompt and system will create it with MiniMax Music 2.6.
+- For MUSIC COVER requests: You will generate a prompt and system will use MiniMax Music Cover.
+- Always describe what you're generating so that user knows what to expect.
 - When modifying existing media, reference what was previously generated and adjust accordingly.
 
 Be accurate, friendly, concise, and exceptionally capable. Help users with whatever they ask."""
@@ -1349,15 +1427,15 @@ def build_media_context_prompt(conv_id: str) -> str:
     items = get_media_context(conv_id)
     if not items: return ""
 
-    parts = ["\n\nMEDIA CONTEXT — You have previously generated the following media in this conversation:"]
+    parts = ["\n\nMEDIA CONTEXT — You have previously generated following media in this conversation:"]
     for i, item in enumerate(items, 1):
         parts.append(
             f"{i}. [{item['type'].upper()}] Prompt: \"{item['prompt']}\" | "
             f"Description: \"{item['description']}\" | URL: {item['url']}"
         )
     parts.append(
-        "When the user asks to modify, update, or reference any of these, use the context above. "
-        "You know exactly what each piece of media contains because you created the prompts for them."
+        "When user asks to modify, update, or reference any of these, use context above. "
+        "You know exactly what each piece of media contains because you created prompts for them."
     )
     return "\n".join(parts)
 
@@ -1655,7 +1733,7 @@ async def build_media_prompt(user_prompt: str, media_type: str, conv_id: str = N
     """Use LLM to craft an optimized prompt for media generation"""
     media_context = build_media_context_prompt(conv_id) if conv_id else ""
 
-    system = f"""You are an expert {media_type} prompt engineer. Your job is to take the user's request and create an optimized, detailed prompt for an AI {media_type} generator.
+    system = f"""You are an expert {media_type} prompt engineer. Your job is to take user's request and create an optimized, detailed prompt for an AI {media_type} generator.
 
 Rules:
 - Be specific and descriptive
@@ -1985,7 +2063,7 @@ Original prompt: "{original_prompt}"
 Original description: "{original_description}"
 User's modification request: "{prompt}"
 
-Create a NEW prompt that incorporates the user's modifications into the original concept."""
+Create a NEW prompt that incorporates user's modifications into original concept."""
 
                     yield sse({"type": "status", "message": f"Updating your {media_type}..."})
 
@@ -2099,7 +2177,7 @@ You are a research assistant. I performed a web search and gathered these result
 
 {search_results}
 
-Answer the user's question based on these results. Cite sources if possible.""" + media_ctx
+Answer user's question based on these results. Cite sources if possible.""" + media_ctx
                     user_memory = user.get("memory", "")
                     if user_memory: system_prompt += f"\n\nUser Context: {user_memory}"
                     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}]
@@ -2254,95 +2332,151 @@ async def generate_music_endpoint(req: Request, res: Response):
 
 
 # =========================
-# FILE ANALYSIS ENDPOINT
+# UPDATED FILE ANALYSIS ENDPOINT
 # =========================
 @app.post("/analyze/file")
-async def analyze_file(req: Request, file: UploadFile = File(...), stream: bool = True):
+async def analyze_file_endpoint(
+    req: Request,
+    files: List[UploadFile] = File(...),
+    prompt: str = Form(""),
+    stream: bool = True
+):
+    """
+    Enhanced file analysis endpoint supporting:
+    - Up to 5 files (images/videos/documents).
+    - Text prompt for analysis (e.g. "How much money is in this picture?").
+    - Video duration check (max 60s).
+    - Multi-image support.
+    """
     user = await get_user(req, Response())
-    content = await file.read()
-    filename = file.filename or "unknown"
-    content_type = file.content_type or ""
-    file_size = len(content)
     
-    if not content: raise HTTPException(400, "Empty file")
-    category = get_file_category(filename)
-    max_allowed = MAX_ZIP_SIZE if category == FileCategory.ARCHIVE else MAX_FILE_SIZE
-    if file_size > max_allowed: raise HTTPException(400, f"File too large. Max: {format_file_size(max_allowed)}")
+    if len(files) > 5:
+        raise HTTPException(400, "Maximum of 5 files allowed at a time.")
     
-    if content_type.startswith("image/") or category == FileCategory.IMAGE:
-        return await handle_image_analysis(content, filename, stream)
+    # Stores base64 data URLs for Gemini
+    visual_parts = [] 
+    text_parts = []
+    video_count = 0
     
-    result = await extract_file_content(content, filename)
-    
-    if category == FileCategory.ARCHIVE and result.files:
-        return await handle_archive_analysis(result, stream)
-    
-    return await handle_text_analysis(result, stream, file_metadata=result.metadata)
+    for uploaded_file in files:
+        content = await uploaded_file.read()
+        filename = uploaded_file.filename or "unknown"
+        content_type = uploaded_file.content_type or ""
+        file_size = len(content)
+        
+        logger.info(f"[FILE] Upload: {filename} ({format_file_size(file_size)}, type={content_type})")
+        
+        if not content:
+            continue
 
+        # --- VIDEO HANDLING ---
+        if content_type.startswith("video/") or get_file_category(filename) == FileCategory.VIDEO:
+            video_count += 1
+            if video_count > 1:
+                raise HTTPException(400, "Only 1 video can be analyzed at a time.")
+            
+            try:
+                duration = get_video_duration(content)
+                if duration > 60:
+                    raise HTTPException(400, f"Video is too long ({duration:.1f}s). Maximum allowed is 60 seconds.")
+                logger.info(f"[VIDEO] Duration accepted: {duration:.1f}s")
+            except Exception as e:
+                if isinstance(e, HTTPException): raise
+                logger.error(f"Video processing error: {e}")
+                raise HTTPException(400, "Could not process video file. Ensure it is a valid format.")
 
-async def handle_archive_analysis(result: FileExtractionResult, stream: bool):
-    files_summary = [f"- {f['name']} ({f.get('size_formatted', '?')}) - {f.get('status', '?')}" for f in result.files]
-    full_content = f"Archive: {result.metadata.get('filename')}\nFiles:\n" + "\n".join(files_summary) + "\n\n" + result.content
-    
-    messages = [
-        {"role": "system", "content": get_system_prompt("") + "\n\nAnalyze this archive file. Describe structure, purpose, and highlight important files."},
-        {"role": "user", "content": full_content}
-    ]
-    
-    if stream:
-        async def gen():
-            yield sse({"type": "file_metadata", "metadata": result.metadata, "files": result.files})
-            async for token in stream_gemini_chat(messages):
-                yield sse({"type": "token", "text": token})
-            yield sse({"type": "done"})
-        return StreamingResponse(gen(), media_type="text/event-stream")
-    
-    reply = await gemini_chat_complete(messages)
-    return {"analysis": reply, "metadata": result.metadata, "files": result.files}
+            # Extract frames
+            frames = extract_video_frames(content)
+            for i, frame_b64 in enumerate(frames):
+                # Format as OpenAI-style URL for convert_messages_to_gemini
+                visual_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"}
+                })
+                if i == 0:
+                    text_parts.append(f"\n[Video Frame Analysis: {filename}]\n")
 
+        # --- IMAGE HANDLING ---
+        elif content_type.startswith("image/") or get_file_category(filename) == FileCategory.IMAGE:
+            b64 = base64.b64encode(content).decode()
+            visual_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+            })
+            text_parts.append(f"\n[Image Analysis: {filename}]\n")
 
-async def handle_text_analysis(result: FileExtractionResult, stream: bool, file_metadata: Dict[str, Any] = None):
-    if file_metadata is None: file_metadata = result.metadata
-    filename = result.metadata.get("filename", "file.txt")
-    prompt = f"Analyze file '{filename}':\n\n{result.content}"
-    
-    messages = [
-        {"role": "system", "content": get_system_prompt("") + " Analyze uploaded file. Review code for errors, summarize docs, or describe data structure."},
-        {"role": "user", "content": prompt}
-    ]
-    
-    if stream:
-        async def gen():
-            yield sse({"type": "file_metadata", "metadata": file_metadata})
-            async for token in stream_gemini_chat(messages):
-                yield sse({"type": "token", "text": token})
-            yield sse({"type": "done"})
-        return StreamingResponse(gen(), media_type="text/event-stream")
-    
-    reply = await gemini_chat_complete(messages)
-    return {"analysis": reply, "metadata": file_metadata, "content": result.content}
+        # --- TEXT/DOC/CODE HANDLING ---
+        else:
+            result = await extract_file_content(content, filename)
+            text_parts.append(f"\n--- FILE: {filename} ---\n{result.content}")
 
+    # --- ROUTE TO HANDLER ---
+    
+    # Priority: Visual Analysis (Images/Video)
+    if visual_parts:
+        logger.info(f"[ANALYSIS] Processing {len(visual_parts)} visual items with prompt: '{prompt[:50]}...'")
+        
+        # Construct user message: [Prompt, Image, Image, ...]
+        user_content = []
+        if prompt:
+            user_content.append({"type": "text", "text": prompt})
+        user_content.extend(visual_parts)
+        
+        messages = [
+            {"role": "system", "content": get_system_prompt("") + "\n\nYou are analyzing images and video frames. Be precise."},
+            {"role": "user", "content": user_content}
+        ]
+        
+        if stream:
+            async def vision_gen():
+                task = asyncio.current_task()
+                active_streams[user["id"]] = task
+                try:
+                    async for token in stream_gemini_chat(messages):
+                        if task.cancelled(): break
+                        yield sse({"type": "token", "text": token})
+                    # Note: We don't save to DB in this endpoint unless we add conv_id logic
+                    yield sse({"type": "done"})
+                except Exception as e:
+                    logger.error(f"Vision stream error: {e}")
+                    yield sse({"type": "error", "message": str(e)})
+                finally:
+                    active_streams.pop(user["id"], None)
+            return StreamingResponse(vision_gen(), media_type="text/event-stream")
+        else:
+            reply = await gemini_chat_complete(messages)
+            return {"analysis": reply}
 
-async def handle_image_analysis(content: bytes, filename: str, stream: bool):
-    metadata = {"filename": filename, "category": "image", "size": len(content)}
-    mime_type = "image/jpeg"
-    ext = Path(filename).suffix.lower()
-    if ext == ".png": mime_type = "image/png"
-    elif ext == ".webp": mime_type = "image/webp"
-    elif ext == ".gif": mime_type = "image/gif"
-    
-    if stream:
-        async def gen():
-            yield sse({"type": "file_metadata", "metadata": metadata})
-            analysis = await gemini_vision_analyze(base64.b64encode(content).decode(), mime_type)
-            for char in analysis:
-                yield sse({"type": "token", "text": char})
-                await asyncio.sleep(0.001)
-            yield sse({"type": "done"})
-        return StreamingResponse(gen(), media_type="text/event-stream")
-    
-    analysis = await gemini_vision_analyze(base64.b64encode(content).decode(), mime_type)
-    return JSONResponse(content={"content": analysis, "metadata": metadata})
+    # Fallback: Text Analysis (Code, Docs, Archives)
+    if text_parts:
+        combined_text = "\n".join(text_parts)
+        full_prompt = f"{prompt}\n\n{combined_text}" if prompt else combined_text
+        
+        messages = [
+            {"role": "system", "content": get_system_prompt("") + " Analyze the provided file content."},
+            {"role": "user", "content": full_prompt}
+        ]
+        
+        if stream:
+            async def text_gen():
+                task = asyncio.current_task()
+                active_streams[user["id"]] = task
+                try:
+                    async for token in stream_gemini_chat(messages):
+                        if task.cancelled(): break
+                        yield sse({"type": "token", "text": token})
+                    yield sse({"type": "done"})
+                except Exception as e:
+                    logger.error(f"Text analysis stream error: {e}")
+                    yield sse({"type": "error", "message": str(e)})
+                finally:
+                    active_streams.pop(user["id"], None)
+            return StreamingResponse(text_gen(), media_type="text/event-stream")
+        else:
+            reply = await gemini_chat_complete(messages)
+            return {"analysis": reply}
+
+    raise HTTPException(400, "No valid files provided for analysis.")
 
 
 @app.get("/file-types")
@@ -2471,7 +2605,7 @@ async def create_new_chat():
 def health():
     return {
         "status": "healthy",
-        "version": "3.0.0-Ultra",
+        "version": "3.1.0-Ultra",
         "services": {
             "google_gemini_500b": bool(GOOGLE_API_KEY),
             "groq_gemma_27b": bool(GROQ_API_KEY),
@@ -2487,7 +2621,7 @@ def health():
             "primary_llm": PRIMARY_LLM_MODEL,
             "fast_llm": FAST_LLM_MODEL,
             "image_gen": REPLICATE_IMAGE_MODEL,
-            "video_gen": Replicate_VIDEO_MODEL,
+            "video_gen": REPLICATE_VIDEO_MODEL,
             "music_gen": REPLICATE_MUSIC_MODEL,
             "music_cover": REPLICATE_MUSIC_COVER_MODEL,
         }
